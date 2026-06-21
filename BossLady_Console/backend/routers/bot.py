@@ -150,27 +150,32 @@ async def restart_napcat():
         return {"success": False, "error": "未找到 NapCat 目录"}
 
     try:
-        # 尝试终止现有 NapCat 进程
+        # 实际进程名是 NapCatWinBootMain.exe（不是 NapCat.Shell.exe）
         subprocess.run(
-            ["taskkill", "/IM", "NapCat.Shell.exe", "/F"],
+            ["taskkill", "/IM", "NapCatWinBootMain.exe", "/F"],
             capture_output=True, timeout=5
         )
     except Exception:
         pass
 
-    # 查找 .bat 启动脚本
-    shell_dir = napcat_dir
-    bat_candidates = list(shell_dir.glob("*.bat"))
-    if not bat_candidates:
-        return {"success": False, "error": "未找到 NapCat 启动脚本 (.bat)"}
+    # 优先用快速登录脚本「启动老板娘.bat」（本机 QQ + -q 快速登录），
+    # 否则回退到首个 .bat（避免随机抓到 KillQQ.bat 之类）
+    quick_bat = napcat_dir / "启动老板娘.bat"
+    if quick_bat.exists():
+        bat = quick_bat
+    else:
+        bat_candidates = list(napcat_dir.glob("*.bat"))
+        if not bat_candidates:
+            return {"success": False, "error": "未找到 NapCat 启动脚本 (.bat)"}
+        bat = bat_candidates[0]
 
     try:
         subprocess.Popen(
-            [str(bat_candidates[0])],
-            cwd=str(shell_dir),
+            [str(bat)],
+            cwd=str(napcat_dir),
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
-        return {"success": True, "message": "NapCat 重启命令已发送"}
+        return {"success": True, "message": f"NapCat 重启命令已发送（{bat.name}）"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

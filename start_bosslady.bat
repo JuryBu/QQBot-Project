@@ -22,26 +22,16 @@ echo   Project: %ROOT%
 echo   Python:  %PYTHON%
 echo.
 
-:: 1. Start NapCat
+:: 1. Start NapCat (复用本机 QQ + NapCat v4.17.53 的快速登录脚本，与原启动方式一致；
+::    避免改用 39038 内置 QQ + 无 -q 扫码登录导致登录态对不上、ErrCode:3)
 echo [1/3] Starting NapCat...
-set "NAPCAT_SHELL_DIR="
-for /d %%d in ("%ROOT%\NapCat*") do (
-    for /d %%s in ("%%d\NapCat.*.Shell") do (
-        if exist "%%s\NapCatWinBootMain.exe" (
-            if exist "%%s\QQ.exe" (
-                set "NAPCAT_SHELL_DIR=%%s"
-            )
-        )
-    )
-)
-
-if not defined NAPCAT_SHELL_DIR (
-    echo       [WARN] NapCat not found, skipping.
+set "NAPCAT_QUICK_BAT=%ROOT%\NapCat_v4.17.53\启动老板娘.bat"
+if not exist "%NAPCAT_QUICK_BAT%" (
+    echo       [WARN] NapCat quick-login script not found, skipping.
     goto :napcat_done
 )
-
-echo       Found: %NAPCAT_SHELL_DIR%
-start /B "" "%NAPCAT_SHELL_DIR%\NapCatWinBootMain.exe" >nul 2>&1
+echo       Using NapCat_v4.17.53 quick-login script
+start "NapCat" /MIN "%NAPCAT_QUICK_BAT%"
 echo       [OK] NapCat started.
 
 :napcat_done
