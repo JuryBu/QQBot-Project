@@ -1,0 +1,56 @@
+{
+  "name": "web_fetch",
+  "description": "无头网页抓取，获取页面截图/文本/HTML，类似 MCP web-fetcher",
+  "category": "web",
+  "timeout_ms": 30000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "目标URL"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "text",
+          "html",
+          "links",
+          "screenshot",
+          "interact"
+        ],
+        "description": "抓取模式"
+      },
+      "session_id": {
+        "type": "string",
+        "description": "会话复用ID"
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "click",
+          "type",
+          "scroll",
+          "wait",
+          "screenshot",
+          "content"
+        ],
+        "description": "交互动作"
+      },
+      "selector": {
+        "type": "string",
+        "description": "CSS选择器"
+      },
+      "value": {
+        "type": "string",
+        "description": "输入值"
+      },
+      "scroll_count": {
+        "type": "integer",
+        "description": "滚动次数"
+      }
+    },
+    "required": []
+  },
+  "builtin": true
+}

@@ -1,0 +1,28 @@
+{
+  "name": "save_data",
+  "description": "保存内容到本地，可选勾选发送到 QQ",
+  "category": "data",
+  "timeout_ms": 10000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "data": {
+        "type": "string",
+        "description": "要保存的数据内容"
+      },
+      "path": {
+        "type": "string",
+        "description": "Sandbox内保存路径"
+      },
+      "encoding": {
+        "type": "string",
+        "description": "编码(默认utf-8)"
+      }
+    },
+    "required": [
+      "data",
+      "path"
+    ]
+  },
+  "builtin": true
+}

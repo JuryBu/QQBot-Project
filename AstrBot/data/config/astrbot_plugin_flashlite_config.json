@@ -1,0 +1,13 @@
+﻿{
+  "sync_trigger_interval": 5,
+  "sync_time_interval": 60,
+  "sync_time_min_msgs": 3,
+  "sampling_mode": "dynamic",
+  "dynamic_sampling": "{\"window_minutes\":10,\"thresholds\":[5,15,30],\"intervals\":[3,5,10,15]}",
+  "group_overrides": "{}",
+  "wake_keywords": "老板娘,boss",
+  "gemini_api_key": "",
+  "thinking_level": "MEDIUM",
+  "max_context_messages": 15,
+  "review_interval_hours": 24
+}

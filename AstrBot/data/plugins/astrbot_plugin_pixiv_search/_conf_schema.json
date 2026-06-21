@@ -1,0 +1,102 @@
+{
+  "refresh_token": {
+      "description": "Pixiv Refresh Token",
+      "type": "string",
+      "hint": "用于 API 认证，安全性更高。获取方法请参考 pixiv-api 文档或网络教程。",
+      "default": "",
+      "is_sensitive": true,
+      "required": true
+  },
+  "return_count": {
+      "description": "每次搜索返回的图片数量",
+      "type": "int",
+      "hint": "单次 /pixiv 命令回复的图片张数。有效范围: 1-10，超出范围的值会被自动限制在有效范围内。",
+      "default": 1,
+      "min": 1,
+      "max": 10
+  },
+  "r18_mode": {
+      "description": "R18 内容过滤模式",
+      "type": "string",
+      "hint": "选择如何处理 R18 内容：'过滤 R18' (默认), '允许 R18', '仅 R18'",
+      "default": "过滤 R18",
+      "options": [
+          "过滤 R18",
+          "允许 R18",
+          "仅 R18"
+      ]
+  },
+  "ai_filter_mode": {
+      "description": "AI 生成作品过滤模式",
+      "type": "string",
+      "hint": "选择如何处理 AI 生成的作品：'显示 AI 作品' (默认), '过滤 AI 作品', '仅 AI 作品'",
+      "default": "显示 AI 作品",
+      "options": [
+          "显示 AI 作品",
+          "过滤 AI 作品",
+          "仅 AI 作品"
+      ]
+  },
+  "deep_search_depth": {
+      "description": "深度搜索时搜索页数深度",
+      "type": "int", 
+      "hint": "设置为 -1 表示无限制搜索，0 表示仅搜索第一页，其他值表示搜索页数。有效范围: -1 或 1-50。",
+      "default": 3,
+      "min": -1,
+      "max": 50
+  },
+  "show_details": {
+      "description": "是否在发送图片时附带详细信息",
+      "type": "bool",
+      "hint": "设置为 false 时，仅发送图片，不附带文字详情。",
+      "default": true
+  },
+  "forward_threshold": {
+      "description": "单次发送图片张数超过该值时自动使用消息转发",
+      "type": "int",
+      "hint": "设置为 0 时禁用转发。有效范围: 1-20，超出范围的值会被自动限制在有效范围内。",
+      "default": 5,
+      "min": 1,
+      "max": 20
+  },
+  "show_filter_result": {
+      "description": "是否显示过滤内容提示",
+      "type": "bool",
+      "hint": "设置为 true 时，过滤内容时会输出提示信息；false 则不输出。",
+      "default": true
+  },
+  "is_fromfilesystem": {
+    "description": "是否通过文件转发",
+    "type": "bool",
+    "hint": "转发图片是否走文件转发,默认为true,如果图片过大,可能会导致内存不足,请设置为false",
+    "default": false
+  },
+  "refresh_token_interval_minutes": {
+      "description": "自动刷新 Refresh Token 的间隔时间（分钟）",
+      "type": "int",
+      "hint": "为防止 Refresh Token 因长期未使用而失效，插件会定期尝试使用它进行认证。单位为分钟，设置为 0 或负数则禁用自动刷新。",
+      "default": 180,
+      "min": 0,
+      "max": 10080
+  },
+  "subscription_enabled": {
+      "description": "是否启用订阅功能",
+      "type": "bool",
+      "hint": "启用后，用户将能够订阅画师和标签，并接收更新推送。",
+      "default": true
+  },
+  "subscription_check_interval_minutes": {
+      "description": "订阅更新检查间隔（分钟）",
+      "type": "int",
+      "hint": "后台任务检查订阅更新的频率。建议不要设置得太频繁，以免给 Pixiv 服务器带来过大压力。",
+      "default": 30,
+      "min": 5,
+      "max": 1440
+  },
+  "proxy": {
+      "description": "代理地址",
+      "type": "string",
+      "hint": "例如 http://127.0.0.1:7890，留空则不使用代理。",
+      "default": ""
+  }
+}

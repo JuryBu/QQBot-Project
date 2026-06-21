@@ -1,0 +1,39 @@
+{
+  "name": "task_set",
+  "description": "Task 后台任务管理——创建/检查/终止后台长运行任务（由工具模型子代理执行）",
+  "category": "system",
+  "timeout_ms": 5000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["create", "check", "list", "kill"],
+        "description": "操作: create=创建任务, check=查看进度, list=列出活跃任务, kill=终止任务"
+      },
+      "task_description": {
+        "type": "string",
+        "description": "任务描述(create时必填)"
+      },
+      "task_id": {
+        "type": "string",
+        "description": "任务ID(check/kill时必填)"
+      },
+      "source_pointer": {
+        "type": "string",
+        "description": "来源指针地址——引用 Sandbox 中的相关文件"
+      },
+      "steps": {
+        "type": "string",
+        "description": "步骤列表JSON。每个step: {\"desc\":\"描述\", \"tool\":\"工具名\"(可选), \"args\":{...}(可选), \"batch\":N(可选,同号并行), \"wake_at_step\":true(可选,checkpoint唤醒)}"
+      },
+      "wake_condition": {
+        "type": "string",
+        "enum": ["notify_main", "write_report", "silent"],
+        "description": "任务完成后: notify_main=后台静默唤醒主模型(默认), write_report=仅写报告, silent=静默"
+      }
+    },
+    "required": ["action"]
+  },
+  "builtin": true
+}

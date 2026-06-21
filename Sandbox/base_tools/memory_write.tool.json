@@ -1,0 +1,49 @@
+{
+  "name": "memory_write",
+  "description": "写入新记忆——持久化重要信息、技术方案、踩坑经验等",
+  "category": "memory",
+  "timeout_ms": 5000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "标题(50字内)"
+      },
+      "content": {
+        "type": "string",
+        "description": "markdown内容"
+      },
+      "tags": {
+        "type": "string",
+        "description": "标签JSON数组字符串"
+      },
+      "workspace": {
+        "type": "string",
+        "description": "工作区(群号/QQ号/general)"
+      },
+      "category": {
+        "type": "string",
+        "enum": [
+          "general",
+          "problem-solution",
+          "technical-note",
+          "conversation"
+        ]
+      },
+      "search_summary": {
+        "type": "string",
+        "description": "搜索优化摘要"
+      },
+      "pinned": {
+        "type": "boolean",
+        "description": "是否置顶"
+      }
+    },
+    "required": [
+      "title",
+      "content"
+    ]
+  },
+  "builtin": true
+}

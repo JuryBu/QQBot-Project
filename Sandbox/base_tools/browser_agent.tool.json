@@ -1,0 +1,23 @@
+{
+  "name": "browser_agent",
+  "description": "有头浏览器子代理，可录制操作视频，用于需要视觉反馈的网页交互",
+  "category": "web",
+  "timeout_ms": 60000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "task": {
+        "type": "string",
+        "description": "浏览器任务描述"
+      },
+      "url": {
+        "type": "string",
+        "description": "起始URL"
+      }
+    },
+    "required": [
+      "task"
+    ]
+  },
+  "builtin": true
+}

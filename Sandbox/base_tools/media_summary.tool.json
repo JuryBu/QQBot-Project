@@ -1,0 +1,36 @@
+{
+  "name": "media_summary",
+  "description": "综合多媒体摘要工具。处理转发消息、视频、多图等多媒体内容，调用辅助模型生成分级分片摘要",
+  "category": "媒体处理",
+  "builtin": true,
+  "timeout_ms": 60000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "content": {
+        "type": "string",
+        "description": "媒体内容(转发消息JSON/视频URL/图片描述)"
+      },
+      "media_type": {
+        "type": "string",
+        "enum": [
+          "forward",
+          "video",
+          "images"
+        ],
+        "description": "媒体类型"
+      },
+      "media_count": {
+        "type": "integer",
+        "description": "媒体数量(图片张数/转发条数)"
+      },
+      "duration": {
+        "type": "integer",
+        "description": "视频时长(秒)"
+      }
+    },
+    "required": [
+      "content"
+    ]
+  }
+}

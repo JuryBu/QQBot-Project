@@ -1,0 +1,27 @@
+{
+  "name": "upload_data",
+  "description": "从 Sandbox 发送文件到 QQ。支持图片、文件等类型发送",
+  "category": "数据传输",
+  "builtin": true,
+  "timeout_ms": 30000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "source": {
+        "type": "string",
+        "description": "Sandbox 内文件路径"
+      },
+      "filename": {
+        "type": "string",
+        "description": "发送时显示的文件名"
+      },
+      "send_to_qq": {
+        "type": "boolean",
+        "description": "是否发送到QQ(默认true)"
+      }
+    },
+    "required": [
+      "source"
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "sandbox_exec",
+  "description": "在 Sandbox 范围内执行命令，限定 runtimes 环境，支持 Python/Node/Shell",
+  "category": "execution",
+  "timeout_ms": 300000,
+  "max_memory_mb": 256,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "code": {
+        "type": "string",
+        "description": "要执行的代码"
+      },
+      "language": {
+        "type": "string",
+        "enum": [
+          "python",
+          "node",
+          "bash"
+        ],
+        "description": "语言"
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "description": "超时毫秒数(默认30000)"
+      },
+      "max_memory_mb": {
+        "type": "integer",
+        "description": "运存限制MB(默认256)"
+      }
+    },
+    "required": [
+      "code"
+    ]
+  },
+  "builtin": true
+}

@@ -1,0 +1,33 @@
+{
+  "name": "modify_file",
+  "description": "修改 Sandbox workspace 内文件（允许并行调用），精确替换模式",
+  "category": "filesystem",
+  "timeout_ms": 10000,
+  "parallel": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Sandbox 内相对路径"
+      },
+      "content": {
+        "type": "string",
+        "description": "文件内容"
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "write",
+          "append"
+        ],
+        "description": "write=覆盖,append=追加"
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ]
+  },
+  "builtin": true
+}

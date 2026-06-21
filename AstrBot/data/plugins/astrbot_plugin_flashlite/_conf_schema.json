@@ -1,0 +1,74 @@
+{
+    "sync_trigger_interval": {
+        "description": "同步触发间隔（每 N 条群消息触发一次 Flash Lite）",
+        "type": "int",
+        "hint": "建议 3-10，越小调用越频繁",
+        "default": 5,
+        "minimum": 2
+    },
+    "sync_time_interval": {
+        "description": "时间兜底触发间隔（秒）",
+        "type": "int",
+        "hint": "超过该时间且达到最低消息数则触发同步",
+        "default": 60,
+        "minimum": 10
+    },
+    "sync_time_min_msgs": {
+        "description": "时间兜底触发最低消息数",
+        "type": "int",
+        "hint": "时间兜底需要至少积累这么多条消息才触发（防止低活群频繁触发浪费 API）",
+        "default": 3,
+        "minimum": 1
+    },
+    "sampling_mode": {
+        "description": "采样模式",
+        "type": "string",
+        "hint": "dynamic=智能动态调整间隔, fixed=固定间隔",
+        "default": "dynamic",
+        "options": ["dynamic", "fixed"]
+    },
+    "dynamic_sampling": {
+        "description": "动态采样配置（JSON格式，sampling_mode=dynamic 时生效）",
+        "type": "string",
+        "hint": "包含 window_minutes(滑动窗口分钟)、thresholds(活跃度阈值列表)、intervals(对应间隔列表)。示例: {\"window_minutes\":10,\"thresholds\":[5,15,30],\"intervals\":[3,5,10,15]}",
+        "default": "{\"window_minutes\":10,\"thresholds\":[5,15,30],\"intervals\":[3,5,10,15]}"
+    },
+    "group_overrides": {
+        "description": "每群独立采样配置（JSON格式）",
+        "type": "string",
+        "hint": "按群号覆盖全局采样间隔。格式: {\"群号\":{\"sync_interval\":10,\"enabled\":true}}",
+        "default": "{}"
+    },
+    "wake_keywords": {
+        "description": "唤醒关键词列表",
+        "type": "string",
+        "hint": "逗号分隔的关键词列表，出现任一关键词立即触发",
+        "default": "老板娘,boss"
+    },
+    "gemini_api_key": {
+        "description": "Gemini API Key（留空则自动从 AstrBot 配置读取）",
+        "type": "string",
+        "hint": "可为空，引擎会自动搜索 cmd_config.json 中的 key",
+        "default": ""
+    },
+    "thinking_level": {
+        "description": "Flash Lite 思考级别",
+        "type": "string",
+        "hint": "LOW/MEDIUM/HIGH，建议 MEDIUM",
+        "default": "MEDIUM"
+    },
+    "max_context_messages": {
+        "description": "判断时最多读取多少条最近消息",
+        "type": "int",
+        "hint": "越多上下文越准确，但 token 开销也越大",
+        "default": 15,
+        "minimum": 5
+    },
+    "review_interval_hours": {
+        "description": "Sandbox 定期 Review 间隔（小时）",
+        "type": "int",
+        "hint": "建议 12-48，设为 0 关闭定期 Review",
+        "default": 24,
+        "minimum": 0
+    }
+}

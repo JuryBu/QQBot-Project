@@ -1,0 +1,28 @@
+{
+  "storage": {
+    "max_total_mb": 512,
+    "max_single_file_mb": 50,
+    "max_workspace_files": 1000
+  },
+  "execution": {
+    "timeout_default_ms": 30000,
+    "max_timeout_ms": 60000,
+    "ram_limit_mb": 256,
+    "max_concurrent": 3,
+    "concurrent_tasks_max": 3,
+    "max_code_size_kb": 100,
+    "max_stdout_chars": 10000,
+    "max_stderr_chars": 5000
+  },
+  "security": {
+    "allow_symlinks": false,
+    "allow_absolute_paths": false,
+    "blocked_extensions": [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js"],
+    "max_path_depth": 10
+  },
+  "network": {
+    "allow_outbound": true,
+    "allow_direct_socket": false,
+    "allowed_tools": ["web_fetch", "web_search", "browser_agent"]
+  }
+}

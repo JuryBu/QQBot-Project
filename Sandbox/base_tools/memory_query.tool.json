@@ -1,0 +1,56 @@
+{
+  "name": "memory_query",
+  "description": "搜索记忆——模糊搜索标题、摘要、标签",
+  "category": "memory",
+  "timeout_ms": 5000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "搜索关键词"
+      },
+      "workspace": {
+        "type": "string",
+        "description": "工作区"
+      },
+      "grep": {
+        "type": "string",
+        "description": "全文精确搜索"
+      },
+      "depth": {
+        "type": "string",
+        "enum": [
+          "index",
+          "summary",
+          "full"
+        ]
+      },
+      "scope": {
+        "type": "string",
+        "enum": [
+          "workspace",
+          "global"
+        ]
+      },
+      "tags": {
+        "type": "string",
+        "description": "标签过滤JSON数组"
+      },
+      "after": {
+        "type": "string",
+        "description": "时间过滤(ISO/YYYY-MM-DD)"
+      },
+      "before": {
+        "type": "string",
+        "description": "时间过滤(ISO/YYYY-MM-DD)"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "返回条数上限"
+      }
+    },
+    "required": []
+  },
+  "builtin": true
+}

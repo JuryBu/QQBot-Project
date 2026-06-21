@@ -1,0 +1,21 @@
+{
+  "name": "run_custom_tool",
+  "description": "执行自定义工具——调用 workspace/custom_tools/ 中你（或工具模型）创建的 .tool.json 工具",
+  "category": "工具扩展",
+  "builtin": true,
+  "timeout_ms": 60000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "工具名称(workspace/custom_tools/ 下 .tool.json 中的 name 字段)"
+      },
+      "args": {
+        "type": "string",
+        "description": "JSON格式的参数字典，对应 tool.json 中 parameters.properties 定义的参数"
+      }
+    },
+    "required": ["name"]
+  }
+}

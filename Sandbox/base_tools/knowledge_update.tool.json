@@ -1,0 +1,48 @@
+{
+  "name": "knowledge_update",
+  "description": "更新 Knowledge 知识缓存。由 Flash Lite 引擎在每次触发时调用，维护各窗口的话题摘要、活跃用户、群氛围等实时信息。也可由主模型主动调用以修正/补充 Knowledge。",
+  "category": "core",
+  "timeout_ms": 5000,
+  "read_only": false,
+  "parallel": false,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "window_key": {
+        "type": "string",
+        "description": "窗口标识，格式 GroupMessage:群号 或 FriendMessage:QQ号"
+      },
+      "summary": {
+        "type": "string",
+        "description": "话题摘要（200-500字），描述当前窗口在讨论什么"
+      },
+      "active_users": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "当前活跃的用户列表（昵称）"
+      },
+      "mood": {
+        "type": "string",
+        "description": "群氛围描述，如'轻松闲聊'、'激烈讨论'、'安静'"
+      },
+      "recent_topics": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "最近讨论的话题关键词列表"
+      },
+      "operation": {
+        "type": "string",
+        "description": "可选的操作记录（会写入 recent_operations 日志）"
+      }
+    },
+    "required": [
+      "window_key",
+      "summary"
+    ]
+  },
+  "builtin": true
+}

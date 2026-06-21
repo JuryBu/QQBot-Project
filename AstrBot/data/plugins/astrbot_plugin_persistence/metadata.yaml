@@ -1,0 +1,7 @@
+name: "astrbot_plugin_persistence"
+author: "BossLady"
+version: "1.0.0"
+description: "全量 QQ 消息持久化插件。拦截所有消息写入 SQLite，支持撤回标记、冷热数据管理、查询接口。"
+tags: ["工具", "数据", "持久化"]
+license: "MIT"
+python_version: ">=3.8"

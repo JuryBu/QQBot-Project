@@ -1,0 +1,26 @@
+{
+  "name": "grep",
+  "description": "在 Sandbox 内搜索文件内容。支持简单文本匹配（不区分大小写）。返回匹配行及文件路径。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string",
+        "description": "搜索文本（不区分大小写）"
+      },
+      "path": {
+        "type": "string",
+        "description": "搜索路径（相对 Sandbox 根，默认 workspace/）"
+      },
+      "max_results": {
+        "type": "number",
+        "description": "最大结果数（默认20）"
+      }
+    },
+    "required": [
+      "pattern"
+    ]
+  },
+  "timeout_ms": 15000,
+  "category": "file"
+}

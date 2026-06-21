@@ -1,0 +1,18 @@
+{
+  "name": "wait",
+  "description": "等待指定时间后返回。用于定时提醒、延迟操作、等待外部进程完成。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "seconds": {
+        "type": "number",
+        "description": "等待秒数（1-300，默认10）"
+      }
+    },
+    "required": [
+      "seconds"
+    ]
+  },
+  "timeout_ms": 310000,
+  "category": "system"
+}

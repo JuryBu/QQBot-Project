@@ -1,0 +1,6 @@
+﻿{
+  "enable_context_parsing": true,
+  "send_probability": 0.4,
+  "emoji_source": "https://cdn.jsdelivr.net/gh/JuryBu/Emojis/my_emojis.json",
+  "request_timeout": 15
+}

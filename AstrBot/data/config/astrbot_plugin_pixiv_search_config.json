@@ -1,0 +1,15 @@
+﻿{
+    "refresh_token": "",
+    "return_count": 1,
+    "r18_mode": "过滤 R18",
+    "ai_filter_mode": "显示 AI 作品",
+    "deep_search_depth": 3,
+    "show_details": true,
+    "forward_threshold": 5,
+    "show_filter_result": true,
+    "is_fromfilesystem": false,
+    "refresh_token_interval_minutes": 180,
+    "subscription_enabled": true,
+    "subscription_check_interval_minutes": 30,
+    "proxy": ""
+}

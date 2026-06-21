@@ -1,0 +1,7 @@
+name: "astrbot_plugin_flashlite"
+author: "BossLady"
+version: "1.0.0"
+description: "Flash Lite 中断引擎。CPU 中断处理器，负责 Knowledge 更新、CHECKPOINT 压缩触发和主模型唤醒决策。"
+tags: ["核心", "AI", "中断"]
+license: "MIT"
+python_version: ">=3.8"

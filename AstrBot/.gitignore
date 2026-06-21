@@ -19,7 +19,11 @@ cookies.json
 # Data files
 data_v2.db
 data_v3.db
-data
+# data 整目录改为精确排除：放行定制代码(plugins)/插件配置(config)/脱敏模板，仅排运行数据
+data/*
+!data/plugins/
+!data/config/
+!data/cmd_config.example.json
 configs/session
 configs/config.yaml
 cmd_config.json

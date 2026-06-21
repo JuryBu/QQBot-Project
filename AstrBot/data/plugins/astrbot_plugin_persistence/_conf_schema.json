@@ -1,0 +1,35 @@
+{
+    "hot_data_days": {
+        "description": "热数据保留天数（保留完整原始内容）",
+        "type": "int",
+        "hint": "热数据（近N天）保留完整原始消息内容",
+        "default": 7,
+        "minimum": 1
+    },
+    "cold_data_days": {
+        "description": "冷数据保留天数（7-N天，保留文本但清理图片URL）",
+        "type": "int",
+        "hint": "超过热数据天数但在此范围内的数据，图片URL将被清理",
+        "default": 30,
+        "minimum": 7
+    },
+    "batch_size": {
+        "description": "批量写入阈值",
+        "type": "int",
+        "hint": "攒够多少条消息后执行一次批量写入",
+        "default": 20,
+        "minimum": 1
+    },
+    "batch_timeout_seconds": {
+        "description": "批量写入最大等待时间（秒）",
+        "type": "float",
+        "hint": "即使未达到批量阈值，超过此时间也会执行写入",
+        "default": 2.0
+    },
+    "enable_cold_cleanup": {
+        "description": "是否启用冷数据自动清理",
+        "type": "bool",
+        "hint": "开启后会定期清理冷数据中的图片URL信息",
+        "default": true
+    }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "view_file",
+  "description": "查看 Sandbox 内文件内容，支持行号范围",
+  "category": "filesystem",
+  "timeout_ms": 5000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Sandbox 内相对路径"
+      },
+      "start_line": {
+        "type": "integer",
+        "description": "起始行号(1-indexed)"
+      },
+      "end_line": {
+        "type": "integer",
+        "description": "结束行号(1-indexed)"
+      }
+    },
+    "required": [
+      "path"
+    ]
+  },
+  "builtin": true
+}

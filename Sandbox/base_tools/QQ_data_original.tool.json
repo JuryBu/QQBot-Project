@@ -1,0 +1,31 @@
+{
+  "name": "QQ_data_original",
+  "description": "查看原始 QQ 聊天记录，类似 conversation_read_original，支持搜索和范围读取",
+  "category": "data",
+  "timeout_ms": 10000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "window_key": {
+        "type": "string",
+        "description": "窗口标识(GroupMessage:群号)"
+      },
+      "start_seq": {
+        "type": "integer",
+        "description": "起始序号(0=最新)"
+      },
+      "count": {
+        "type": "integer",
+        "description": "返回条数(默认20)"
+      },
+      "keyword": {
+        "type": "string",
+        "description": "关键词搜索"
+      }
+    },
+    "required": [
+      "window_key"
+    ]
+  },
+  "builtin": true
+}

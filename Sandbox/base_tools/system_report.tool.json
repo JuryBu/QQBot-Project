@@ -1,0 +1,33 @@
+{
+  "name": "system_report",
+  "description": "读取 Sandbox 维护报告（正常只读，Review 时开放写入）",
+  "category": "system",
+  "timeout_ms": 5000,
+  "read_only": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "content": {
+        "type": "string",
+        "description": "报告内容"
+      },
+      "report_type": {
+        "type": "string",
+        "enum": [
+          "daily",
+          "review",
+          "status"
+        ],
+        "description": "报告类型"
+      },
+      "review_mode": {
+        "type": "boolean",
+        "description": "是否开启Review写入权限"
+      }
+    },
+    "required": [
+      "content"
+    ]
+  },
+  "builtin": true
+}

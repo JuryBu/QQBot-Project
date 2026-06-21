@@ -1,0 +1,7 @@
+﻿{
+    "hot_data_days": 7,
+    "cold_data_days": 30,
+    "batch_size": 20,
+    "batch_timeout_seconds": 2.0,
+    "enable_cold_cleanup": true
+}

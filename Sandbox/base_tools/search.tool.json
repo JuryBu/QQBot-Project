@@ -1,0 +1,30 @@
+{
+  "name": "search",
+  "description": "统一搜索工具——联网搜索/记忆搜索/文件搜索。scope: auto(自动判断)/web(联网)/memory(记忆)/files(文件)/all(全部)",
+  "category": "search",
+  "timeout_ms": 30000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "搜索关键词"
+      },
+      "scope": {
+        "type": "string",
+        "enum": ["auto", "web", "memory", "files", "all"],
+        "description": "搜索范围：auto=自动判断，web=联网搜索，memory=记忆库，files=文件，all=全部"
+      },
+      "num_results": {
+        "type": "integer",
+        "description": "结果数量(默认5)"
+      },
+      "deep": {
+        "type": "boolean",
+        "description": "深度模式——联网搜索时抓取页面内容并用工具模型概括"
+      }
+    },
+    "required": ["query"]
+  },
+  "builtin": true
+}

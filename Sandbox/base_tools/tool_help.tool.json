@@ -1,0 +1,16 @@
+{
+  "name": "tool_help",
+  "description": "查看工具的详细用法。传入工具名获取参数列表、调用示例和注意事项。不传名字则列出所有可用工具。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "工具名（如 search, web_fetch, memory_write）留空列出全部"
+      }
+    },
+    "required": []
+  },
+  "timeout_ms": 5000,
+  "category": "system"
+}

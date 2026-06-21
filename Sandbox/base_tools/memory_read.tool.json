@@ -1,0 +1,19 @@
+{
+  "name": "memory_read",
+  "description": "读取一条记忆的完整内容",
+  "category": "memory",
+  "timeout_ms": 5000,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "记忆ID"
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "builtin": true
+}

@@ -1,0 +1,10 @@
+﻿{
+  "allow_r18": true,
+  "allow_r18_groups": [],
+  "disallow_r18_groups": [],
+  "exclude_ai": true,
+  "image_hash_break": true,
+  "send_forward": false,
+  "image_size": "small",
+  "image_info": "带标签的基本信息"
+}
