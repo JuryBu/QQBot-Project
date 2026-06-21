@@ -1,7 +1,7 @@
 # 审核报告：CHECKPOINT 重构深度审核
 
 **审核时间**: 2026-04-10  
-**审核范围**: `checkpoint.py`、`main.py`、`agent.py`、`models.py`、`app.js`、`index.html`、`QQBotPlan/Plan_2_CP*`、`QQBotPlan/CHECKPOINT机制讨论记录.md`  
+**审核范围**: `checkpoint.py`、`main.py`、`agent.py`、`models.py`、`app.js`、`index.html`、`QQBotPlan/Plan_2/Plan_2_CP*`、`QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md`  
 **整体评价**: T 文件主链已经接入主模型，但“三系统分立”只完成了一半；当前仍有 4 个必须修复的问题，会直接导致参数失效、压缩边界破坏 T 文件、以及增量同步漏消息。
 
 ## 问题总览
@@ -25,7 +25,7 @@
 
 - ❌ FlashLite / Knowledge 仍然使用 `messages.db`，没有切到 T 文件。  
   **位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:738-752`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:903-914`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:1045-1059`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:1973-1992`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:2274-2342`  
-  **对照设计**：`QQBotPlan/Plan_2_CP_architecture.md:99-103`、`QQBotPlan/Plan_2_CP_integration.md:175-189`  
+  **对照设计**：`QQBotPlan/Plan_2/Plan_2_CP_architecture.md:99-103`、`QQBotPlan/Plan_2/Plan_2_CP_integration.md:175-189`  
   **描述**：同步触发、异步触发、私聊触发、`flashlite_recent_messages` 注入以及 Knowledge 上下文来源都还在调用 `_get_recent_context()`；`checkpoint.py` 里虽然实现了 `build_flashlite_context()`，但没有任何调用点。  
   **影响**：主模型看到的是 T，FlashLite/Knowledge 看到的是 `messages.db` 的另一套上下文，两边的“当前对话状态”可能不一致，三系统分立退化成“主模型一套、FlashLite 一套”。  
   **修复建议**：把 `_get_recent_context()` 的调用点统一替换为 `load(window_key) + build_flashlite_context(t_file)`，让触发判断、Knowledge 更新和主模型都基于同一份 T。
@@ -43,7 +43,7 @@
 ## 2. 参数命名一致性
 
 - ❌ Token 上限参数全链路断裂。  
-  **位置**：`BossLady_Console/backend/routers/models.py:160-165,199-210`、`BossLady_Console/frontend/app.js:1363-1381`、`AstrBot/data/plugins/astrbot_plugin_flashlite/config.json:9`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:160,2697`、`QQBotPlan/Plan_2_CP_compression.md:11,21`、`QQBotPlan/Plan_2_CP_integration.md:118`  
+  **位置**：`BossLady_Console/backend/routers/models.py:160-165,199-210`、`BossLady_Console/frontend/app.js:1363-1381`、`AstrBot/data/plugins/astrbot_plugin_flashlite/config.json:9`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:160,2697`、`QQBotPlan/Plan_2/Plan_2_CP_compression.md:11,21`、`QQBotPlan/Plan_2/Plan_2_CP_integration.md:118`  
   **描述**：前端、后端和 `config.json` 使用的是 `checkpoint_limit`，但 `main.py` 和两份 Plan 文档仍读取/描述 `checkpoint_token_limit`。  
   **影响**：面板保存的 Token 上限不会作用到 T 文件压缩逻辑，运行时回落到默认值 `50000`；文档还会继续误导后续维护者。  
   **修复建议**：统一为单一 key，建议直接使用已经落地在面板和配置文件中的 `checkpoint_limit`；同步修正文档、初始化日志和所有 `_cfg()` 调用。
@@ -66,7 +66,7 @@
 
 - ❌ 压缩率没有被“严格保证”。  
   **位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py:616-635,666-675`  
-  **对照设计**：`QQBotPlan/Plan_2_CP.md:52`、`QQBotPlan/Plan_2_CP_compression.md:115-170`  
+  **对照设计**：`QQBotPlan/Plan_2/Plan_2_CP.md:52`、`QQBotPlan/Plan_2/Plan_2_CP_compression.md:115-170`  
   **描述**：实际压缩率超出 `[target_min, target_max]` 时只打 warning，但仍然把结果写入 T1 并丢弃原文消息。  
   **影响**：如果 Flash Lite 再次生成 1% 或 80% 的异常摘要，系统依旧会接受，核心目标“严格保证压缩率”并未实现。  
   **修复建议**：对越界结果至少做其一：1）重试一次并附带更严格提示；2）直接拒绝本次压缩并保留原 T；3）回退到保守压缩策略，不覆盖 T1。

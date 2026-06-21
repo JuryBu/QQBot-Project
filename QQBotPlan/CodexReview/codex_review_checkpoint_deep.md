@@ -14,12 +14,12 @@
 6. `BossLady_Console/frontend/index.html` — CHECKPOINT 策略卡片 UI
 
 ### 设计文档
-7. `QQBotPlan/Plan_2_CP.md` — 总纲
-8. `QQBotPlan/Plan_2_CP_architecture.md` — 三系统分立架构
-9. `QQBotPlan/Plan_2_CP_T_file.md` — T 文件格式规范
-10. `QQBotPlan/Plan_2_CP_compression.md` — 压缩策略
-11. `QQBotPlan/Plan_2_CP_integration.md` — 集成点清单
-12. `QQBotPlan/CHECKPOINT机制讨论记录.md` — 原始讨论
+7. `QQBotPlan/Plan_2/Plan_2_CP.md` — 总纲
+8. `QQBotPlan/Plan_2/Plan_2_CP_architecture.md` — 三系统分立架构
+9. `QQBotPlan/Plan_2/Plan_2_CP_T_file.md` — T 文件格式规范
+10. `QQBotPlan/Plan_2/Plan_2_CP_compression.md` — 压缩策略
+11. `QQBotPlan/Plan_2/Plan_2_CP_integration.md` — 集成点清单
+12. `QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md` — 原始讨论
 
 ## 审核维度
 

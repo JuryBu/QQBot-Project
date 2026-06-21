@@ -4,7 +4,7 @@
 **审核范围**: `astrbot_plugin_context_enhancer` / `astrbot_plugin_persistence` / `astrbot_plugin_flashlite`
 **整体评价**: 三个插件的方向是对的，但 `flashlite` 存在核心触发时序缺陷，`context_enhancer` 有会误清空上下文的命令判定问题，`checkpoint` 链路目前也没有真正接入主模型请求，整体还不能算稳定可上线。
 
-> 说明：本次按 `QQBotPlan/Task.md` 中 Stage 3-5 对应的三个插件作为“以下三个插件”进行审查。
+> 说明：本次按 `QQBotPlan/Plan_1/Task.md` 中 Stage 3-5 对应的三个插件作为“以下三个插件”进行审查。
 
 ## 🔴 严重问题（必须修复）
 
@@ -119,8 +119,8 @@
   用 `event.set_extra()` 存储，并在 `@on_llm_request` 钩子里把摘要注入 `request.system_prompt`、`request.extra_user_content_parts` 或显式上下文。
 
 ### 问题 10：三个插件都缺少自动化测试，现有验证主要是手工测试文档
-- **位置**：`QQBotPlan/Test_Stage4_persistence.md`
-- **位置**：`QQBotPlan/Test_Stage5_flashlite.md`
+- **位置**：`QQBotPlan/Plan_1/Test_Stage4_persistence.md`
+- **位置**：`QQBotPlan/Plan_1/Test_Stage5_flashlite.md`
 - **描述**：
   仓库里没有针对这三个插件的单元测试或集成测试；目前主要依赖手工步骤文档。对于事件时序、撤回、并发写入、上下文注入这类逻辑，手工测试覆盖不住边界条件。
 - **影响**：

@@ -7,7 +7,7 @@
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py`
 - `Sandbox/base_tools/*.tool.json`（与工具模型声明一致性相关）
 - `QQBotPlan/提示词审计/*.md`
-- `QQBotPlan/Plan_2*.md`
+- `QQBotPlan/Plan_2/Plan_2*.md`
 
 **整体评价**: 架构方向清晰，但安全边界与成本控制存在高风险点；建议先修复安全与递归调用问题，再做缓存与声明一致性优化。
 

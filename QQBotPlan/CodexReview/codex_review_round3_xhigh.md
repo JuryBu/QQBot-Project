@@ -26,7 +26,7 @@
 建议：统一定价源，避免双份常量漂移。
 
 7. 🟡 Plan_3 测试脚本可移植性差：硬编码绝对路径 + GBK 控制台会因 `✅` 报错。  
-位置：[test_stage6_kvcache_all.py:4](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/test_stage6_kvcache_all.py:4)、[test_stage6_kvcache_all.py:35](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/test_stage6_kvcache_all.py:35)、[test_stage11_cost_tracker.py:10](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/test_stage11_cost_tracker.py:10)、[test_stage11_cost_tracker.py:39](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/test_stage11_cost_tracker.py:39)。  
+位置：[test_stage6_kvcache_all.py:4](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_3/test_stage6_kvcache_all.py:4)、[test_stage6_kvcache_all.py:35](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_3/test_stage6_kvcache_all.py:35)、[test_stage11_cost_tracker.py:10](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_3/test_stage11_cost_tracker.py:10)、[test_stage11_cost_tracker.py:39](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_3/test_stage11_cost_tracker.py:39)。  
 建议：改相对路径，输出改 ASCII 或统一 UTF-8。
 
 8. 🟢 私聊窗口命名双标准（`PrivateMessage`/`FriendMessage`）会制造统计噪声。  
@@ -37,4 +37,4 @@
 - 语法检查通过：`main.py/cost_tracker.py/kv_cache.py/models.py/cost.py`。
 - Plan_3 测试脚本在 `PYTHONIOENCODING=utf-8` 下通过；默认 GBK 下会因 emoji 打印报错（已复现）。
 
-完整报告已保存到：[报告_Plan3全量审核_Codex.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/报告_Plan3全量审核_Codex.md)。
+完整报告已保存到：[报告_Plan3全量审核_Codex.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/CodexReview/报告_Plan3全量审核_Codex.md)。

@@ -1,23 +1,23 @@
 # 审核报告：Plan_2_CP 文档 vs CHECKPOINT 实现对比
 
 **审核时间**: 2026-04-10  
-**审核范围**: `QQBotPlan/Plan_2_CP*.md`、`AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py`、`AstrBot/data/plugins/astrbot_plugin_flashlite/agent.py`、`BossLady_Console/backend/routers/models.py`、`BossLady_Console/frontend/app.js`、`BossLady_Console/frontend/index.html`  
+**审核范围**: `QQBotPlan/Plan_2/Plan_2_CP*.md`、`AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py`、`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py`、`AstrBot/data/plugins/astrbot_plugin_flashlite/agent.py`、`BossLady_Console/backend/routers/models.py`、`BossLady_Console/frontend/app.js`、`BossLady_Console/frontend/index.html`  
 **整体评价**: T 文件主链路已经接入，但 FlashLite 判断链路、参数命名链路和旧 CHECKPOINT 调用链没有完全收敛，当前属于“核心能力已落地，外围集成明显不一致”的状态。
 
 ## 一、Plan_2_CP.md 已确认决策清单 10 条核对
 
 | # | 文档设计 | 代码验证 | 结论 |
 |---|---|---|---|
-| 1 | 三系统分立：A/B/C 完全独立，C 负责真正上下文。`QQBotPlan/Plan_2_CP.md:44-45` | `checkpoint.py:248-389` 已实现 T 文件系统；`main.py:2668-2712` 已用 T 替换 `req.contexts`。但 FlashLite 判断仍走 `main.py:2274-2338` 的 `messages.db`，未完全转向 C。 | ⚠️ 部分实现 |
-| 2 | T1 作为 `{role:"user"}` 注入 contexts 开头，不放 system_prompt。`QQBotPlan/Plan_2_CP.md:45-46` | `checkpoint.py:395-430` 先插入 T1 user 消息，再插入固定 assistant ACK。 | ✅ 已实现 |
-| 3 | T 文件持久化到 `QQ_data/checkpoints/`，per-window JSON，重启不丢。`QQBotPlan/Plan_2_CP.md:46-47` | `checkpoint.py:269-339` 采用 per-window 文件路径、自动创建、原子保存。 | ✅ 已实现 |
-| 4 | 工具模型默认不带上下文，仅按需传入。`QQBotPlan/Plan_2_CP.md:47-48` | `_call_tool_model()` 在 `main.py:1548-1557` 仅以任务 prompt 初始化消息，不自动拼接 T 上下文。 | ✅ 已实现 |
-| 5 | 主模型和 FlashLite 都使用 T。`QQBotPlan/Plan_2_CP.md:48-49` | 主模型已在 `main.py:2709-2712` 使用 T；FlashLite 触发判断仍在 `main.py:738-748`、`903-909`、`1044-1055` 调用 `_get_recent_context()`，而 `_get_recent_context()` 仍读 `messages.db`（`main.py:2274-2338`）。 | ⚠️ 部分实现 |
-| 6 | 工具调用全过程记录在 T 中。`QQBotPlan/Plan_2_CP.md:49-50` | `checkpoint.py:345-389`、`395-430` 支持 `tool_calls` / `tool_call_id` 存取；但 `main.py` 没有“回复完成后立即写回 T”的专门钩子，只能依赖下一次 `on_llm_request` 增量同步。 | ⚠️ 部分实现 |
-| 7 | 每个窗口独立 T。`QQBotPlan/Plan_2_CP.md:50-51` | `checkpoint.py:263-272` 按 `window_key` 分文件；`checkpoint.py:263-267` 按窗口加锁。 | ✅ 已实现 |
-| 8 | 最终发送给 LLM 的是 C，不是 A。`QQBotPlan/Plan_2_CP.md:51-52` | `main.py:2709-2712` 明确执行 `req.contexts = self._t_file_mgr.build_llm_contexts(t_file)`。 | ✅ 已实现 |
-| 9 | 压缩率必须保证：Prompt 目标长度 + 后验证 + warning。`QQBotPlan/Plan_2_CP.md:52-53` | `checkpoint.py:141-194` 构建长度约束 Prompt；`checkpoint.py:616-635` 做压缩率验证并记录 warning/info。 | ✅ 已实现 |
-| 10 | 与 AstrBot 框架自带压缩平行：FlashLite 先压缩，框架兜底。`QQBotPlan/Plan_2_CP.md:53-54` | 在本次审核范围内，只能确认插件侧已经先于主模型调用执行 T 压缩与替换（`main.py:2684-2712`）；未见插件关闭 AstrBot 兜底压缩，但也未见显式对接说明。 | ⚠️ 部分可证实 |
+| 1 | 三系统分立：A/B/C 完全独立，C 负责真正上下文。`QQBotPlan/Plan_2/Plan_2_CP.md:44-45` | `checkpoint.py:248-389` 已实现 T 文件系统；`main.py:2668-2712` 已用 T 替换 `req.contexts`。但 FlashLite 判断仍走 `main.py:2274-2338` 的 `messages.db`，未完全转向 C。 | ⚠️ 部分实现 |
+| 2 | T1 作为 `{role:"user"}` 注入 contexts 开头，不放 system_prompt。`QQBotPlan/Plan_2/Plan_2_CP.md:45-46` | `checkpoint.py:395-430` 先插入 T1 user 消息，再插入固定 assistant ACK。 | ✅ 已实现 |
+| 3 | T 文件持久化到 `QQ_data/checkpoints/`，per-window JSON，重启不丢。`QQBotPlan/Plan_2/Plan_2_CP.md:46-47` | `checkpoint.py:269-339` 采用 per-window 文件路径、自动创建、原子保存。 | ✅ 已实现 |
+| 4 | 工具模型默认不带上下文，仅按需传入。`QQBotPlan/Plan_2/Plan_2_CP.md:47-48` | `_call_tool_model()` 在 `main.py:1548-1557` 仅以任务 prompt 初始化消息，不自动拼接 T 上下文。 | ✅ 已实现 |
+| 5 | 主模型和 FlashLite 都使用 T。`QQBotPlan/Plan_2/Plan_2_CP.md:48-49` | 主模型已在 `main.py:2709-2712` 使用 T；FlashLite 触发判断仍在 `main.py:738-748`、`903-909`、`1044-1055` 调用 `_get_recent_context()`，而 `_get_recent_context()` 仍读 `messages.db`（`main.py:2274-2338`）。 | ⚠️ 部分实现 |
+| 6 | 工具调用全过程记录在 T 中。`QQBotPlan/Plan_2/Plan_2_CP.md:49-50` | `checkpoint.py:345-389`、`395-430` 支持 `tool_calls` / `tool_call_id` 存取；但 `main.py` 没有“回复完成后立即写回 T”的专门钩子，只能依赖下一次 `on_llm_request` 增量同步。 | ⚠️ 部分实现 |
+| 7 | 每个窗口独立 T。`QQBotPlan/Plan_2/Plan_2_CP.md:50-51` | `checkpoint.py:263-272` 按 `window_key` 分文件；`checkpoint.py:263-267` 按窗口加锁。 | ✅ 已实现 |
+| 8 | 最终发送给 LLM 的是 C，不是 A。`QQBotPlan/Plan_2/Plan_2_CP.md:51-52` | `main.py:2709-2712` 明确执行 `req.contexts = self._t_file_mgr.build_llm_contexts(t_file)`。 | ✅ 已实现 |
+| 9 | 压缩率必须保证：Prompt 目标长度 + 后验证 + warning。`QQBotPlan/Plan_2/Plan_2_CP.md:52-53` | `checkpoint.py:141-194` 构建长度约束 Prompt；`checkpoint.py:616-635` 做压缩率验证并记录 warning/info。 | ✅ 已实现 |
+| 10 | 与 AstrBot 框架自带压缩平行：FlashLite 先压缩，框架兜底。`QQBotPlan/Plan_2/Plan_2_CP.md:53-54` | 在本次审核范围内，只能确认插件侧已经先于主模型调用执行 T 压缩与替换（`main.py:2684-2712`）；未见插件关闭 AstrBot 兜底压缩，但也未见显式对接说明。 | ⚠️ 部分可证实 |
 
 ## 二、Plan_2_CP_T_file.md 核对
 
@@ -25,23 +25,23 @@
 
 | 文档设计 | 代码验证 | 结论 |
 |---|---|---|
-| 路径命名 `{window_type}_{window_id}.json`。`QQBotPlan/Plan_2_CP_T_file.md:13-16` | `_file_path()` 在 `checkpoint.py:269-272` 用 `window_key.replace(':', '_')` 生成 `GroupMessage_xxx.json` / `FriendMessage_xxx.json`。 | ✅ 已实现 |
-| 顶层包含 `version/window_key/window_type/window_id/T1/messages/metadata`。`QQBotPlan/Plan_2_CP_T_file.md:19-99` | `_create_empty_t_file()` 在 `checkpoint.py:105-134` 与文档主结构一致。 | ✅ 已实现 |
-| `messages` 支持 `role/content/timestamp/meta/tool_calls/tool_call_id`。`QQBotPlan/Plan_2_CP_T_file.md:44-90` | `append_messages()` 在 `checkpoint.py:359-383` 会按需保留 `content`、`tool_calls`、`tool_call_id`、`timestamp`、`meta`。 | ✅ 已实现 |
-| 构建 LLM contexts 时，T1 需变成 `user + assistant ACK` 两条消息。`QQBotPlan/Plan_2_CP_T_file.md:117-147` | `build_llm_contexts()` 在 `checkpoint.py:402-430` 与文档一致。 | ✅ 已实现 |
+| 路径命名 `{window_type}_{window_id}.json`。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:13-16` | `_file_path()` 在 `checkpoint.py:269-272` 用 `window_key.replace(':', '_')` 生成 `GroupMessage_xxx.json` / `FriendMessage_xxx.json`。 | ✅ 已实现 |
+| 顶层包含 `version/window_key/window_type/window_id/T1/messages/metadata`。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:19-99` | `_create_empty_t_file()` 在 `checkpoint.py:105-134` 与文档主结构一致。 | ✅ 已实现 |
+| `messages` 支持 `role/content/timestamp/meta/tool_calls/tool_call_id`。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:44-90` | `append_messages()` 在 `checkpoint.py:359-383` 会按需保留 `content`、`tool_calls`、`tool_call_id`、`timestamp`、`meta`。 | ✅ 已实现 |
+| 构建 LLM contexts 时，T1 需变成 `user + assistant ACK` 两条消息。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:117-147` | `build_llm_contexts()` 在 `checkpoint.py:402-430` 与文档一致。 | ✅ 已实现 |
 
 ### 2. 生命周期与读写时机
 
 | 文档设计 | 代码验证 | 结论 |
 |---|---|---|
-| 首次遇到窗口时创建空 T 文件。`QQBotPlan/Plan_2_CP_T_file.md:151-162` | `load()` 在 `checkpoint.py:285-289` 不存在即创建。 | ✅ 已实现 |
-| 每次 `on_llm_request` 从 `req.contexts` 增量提取新消息，追加后保存。`QQBotPlan/Plan_2_CP_T_file.md:164-176` | `main.py:2684-2690` 会读取 T、调用 `_extract_new_messages()`、再 `append_messages()`。 | ✅ 已实现 |
-| 增量检测要结合长度和内容对比，并跳过 T1 已压缩消息。`QQBotPlan/Plan_2_CP_T_file.md:172-176` | `_extract_new_messages()` 在 `main.py:3015-3032` 只按 `compressed_count + existing_count` 做切片，没有内容级校验。 | ⚠️ 部分实现 |
-| 超阈值时压缩前 N%，更新 T1 与 messages。`QQBotPlan/Plan_2_CP_T_file.md:177-185` | `compress_if_needed()` 在 `checkpoint.py:535-715` 已实现完整流程。 | ✅ 已实现 |
-| LLM 回复后回写 T 文件。`QQBotPlan/Plan_2_CP_T_file.md:186-191` | 代码没有独立回复钩子；当前实现依赖下一次 `on_llm_request` 重新读取 A 系统上下文并增量补入。`main.py:2686-2690` 可间接覆盖上一轮 assistant/tool 消息，但不是“回复后立即回写”。 | ⚠️ 部分实现 |
-| 每次写入都要原子保存。`QQBotPlan/Plan_2_CP_T_file.md:192-196` | `save()` 在 `checkpoint.py:317-335` 先写临时文件，再重命名。 | ✅ 已实现 |
-| 文件损坏回退空 T。`QQBotPlan/Plan_2_CP_T_file.md:215-218` | `load()` 在 `checkpoint.py:303-307` 解析失败时重建空 T。 | ✅ 已实现 |
-| 同窗口使用 `asyncio.Lock` 保证互斥。`QQBotPlan/Plan_2_CP_T_file.md:220-222` | `checkpoint.py:257-267` 定义 per-window 锁；写路径在 `append_messages()` / `compress_if_needed()` 使用。 | ✅ 已实现 |
+| 首次遇到窗口时创建空 T 文件。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:151-162` | `load()` 在 `checkpoint.py:285-289` 不存在即创建。 | ✅ 已实现 |
+| 每次 `on_llm_request` 从 `req.contexts` 增量提取新消息，追加后保存。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:164-176` | `main.py:2684-2690` 会读取 T、调用 `_extract_new_messages()`、再 `append_messages()`。 | ✅ 已实现 |
+| 增量检测要结合长度和内容对比，并跳过 T1 已压缩消息。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:172-176` | `_extract_new_messages()` 在 `main.py:3015-3032` 只按 `compressed_count + existing_count` 做切片，没有内容级校验。 | ⚠️ 部分实现 |
+| 超阈值时压缩前 N%，更新 T1 与 messages。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:177-185` | `compress_if_needed()` 在 `checkpoint.py:535-715` 已实现完整流程。 | ✅ 已实现 |
+| LLM 回复后回写 T 文件。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:186-191` | 代码没有独立回复钩子；当前实现依赖下一次 `on_llm_request` 重新读取 A 系统上下文并增量补入。`main.py:2686-2690` 可间接覆盖上一轮 assistant/tool 消息，但不是“回复后立即回写”。 | ⚠️ 部分实现 |
+| 每次写入都要原子保存。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:192-196` | `save()` 在 `checkpoint.py:317-335` 先写临时文件，再重命名。 | ✅ 已实现 |
+| 文件损坏回退空 T。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:215-218` | `load()` 在 `checkpoint.py:303-307` 解析失败时重建空 T。 | ✅ 已实现 |
+| 同窗口使用 `asyncio.Lock` 保证互斥。`QQBotPlan/Plan_2/Plan_2_CP_T_file.md:220-222` | `checkpoint.py:257-267` 定义 per-window 锁；写路径在 `append_messages()` / `compress_if_needed()` 使用。 | ✅ 已实现 |
 
 ## 三、Plan_2_CP_compression.md 参数表与压缩策略核对
 
@@ -49,30 +49,30 @@
 
 | 文档设计 | 代码验证 | 结论 |
 |---|---|---|
-| 参数名应为 `checkpoint_token_limit`。`QQBotPlan/Plan_2_CP_compression.md:19-26` | `main.py:160`、`2697` 读取的是 `checkpoint_token_limit`；但 `config.json:9`、`models.py:160/178/199-200`、`app.js:1363/1376`、`index.html:427` 使用的都是 `checkpoint_limit`。主链路与面板链路命名不一致。 | ❌ 未实现 |
-| 默认值应为 `50000 / 10 / 0.7 / 300 / 0.20 / 0.40`。`QQBotPlan/Plan_2_CP_compression.md:19-26` | 实际配置文件是 `10000 / 15 / 0.6 / 300 / 0.2 / 0.4`（`config.json:9,21-25`）；前端 HTML 初始值仍写 `50000 / 10 / 0.7 / 300 / 0.20 / 0.40`（`index.html:427-454`），加载后又会被接口值覆盖（`app.js:1363-1368`）。 | ⚠️ 文档默认值已过期 |
+| 参数名应为 `checkpoint_token_limit`。`QQBotPlan/Plan_2/Plan_2_CP_compression.md:19-26` | `main.py:160`、`2697` 读取的是 `checkpoint_token_limit`；但 `config.json:9`、`models.py:160/178/199-200`、`app.js:1363/1376`、`index.html:427` 使用的都是 `checkpoint_limit`。主链路与面板链路命名不一致。 | ❌ 未实现 |
+| 默认值应为 `50000 / 10 / 0.7 / 300 / 0.20 / 0.40`。`QQBotPlan/Plan_2/Plan_2_CP_compression.md:19-26` | 实际配置文件是 `10000 / 15 / 0.6 / 300 / 0.2 / 0.4`（`config.json:9,21-25`）；前端 HTML 初始值仍写 `50000 / 10 / 0.7 / 300 / 0.20 / 0.40`（`index.html:427-454`），加载后又会被接口值覆盖（`app.js:1363-1368`）。 | ⚠️ 文档默认值已过期 |
 
 ### 2. 三重守卫与压缩逻辑
 
 | 文档设计 | 代码验证 | 结论 |
 |---|---|---|
-| 三重守卫：token 超限、消息数足够、冷却期已过。`QQBotPlan/Plan_2_CP_compression.md:5-15` | `checkpoint.py:541-567` 完整实现三重守卫。 | ✅ 已实现 |
-| 压缩前 `compress_front_ratio` 比例，同时至少保留 `keep_recent`。`QQBotPlan/Plan_2_CP_compression.md:28-43` | `checkpoint.py:576-581` 与文档一致。 | ✅ 已实现 |
-| Prompt 使用明确字数/token 目标。`QQBotPlan/Plan_2_CP_compression.md:64-113` | `build_compress_prompt()` 在 `checkpoint.py:141-194` 一致实现。 | ✅ 已实现 |
-| 压缩后做 ratio 校验并记录 warning/info。`QQBotPlan/Plan_2_CP_compression.md:115-170` | `checkpoint.py:616-635` 一致实现。 | ✅ 已实现 |
-| 压缩后更新 T1、messages、metadata。`QQBotPlan/Plan_2_CP_compression.md:172-194` | `checkpoint.py:653-689` 一致实现。 | ✅ 已实现 |
+| 三重守卫：token 超限、消息数足够、冷却期已过。`QQBotPlan/Plan_2/Plan_2_CP_compression.md:5-15` | `checkpoint.py:541-567` 完整实现三重守卫。 | ✅ 已实现 |
+| 压缩前 `compress_front_ratio` 比例，同时至少保留 `keep_recent`。`QQBotPlan/Plan_2/Plan_2_CP_compression.md:28-43` | `checkpoint.py:576-581` 与文档一致。 | ✅ 已实现 |
+| Prompt 使用明确字数/token 目标。`QQBotPlan/Plan_2/Plan_2_CP_compression.md:64-113` | `build_compress_prompt()` 在 `checkpoint.py:141-194` 一致实现。 | ✅ 已实现 |
+| 压缩后做 ratio 校验并记录 warning/info。`QQBotPlan/Plan_2/Plan_2_CP_compression.md:115-170` | `checkpoint.py:616-635` 一致实现。 | ✅ 已实现 |
+| 压缩后更新 T1、messages、metadata。`QQBotPlan/Plan_2/Plan_2_CP_compression.md:172-194` | `checkpoint.py:653-689` 一致实现。 | ✅ 已实现 |
 
 ## 四、Plan_2_CP_integration.md 修改清单核对
 
 | 章节 | 文档设计 | 代码验证 | 结论 |
 |---|---|---|---|
-| 1 | `checkpoint.py` 重写，新增 `TFileManager`，旧逻辑退场。`QQBotPlan/Plan_2_CP_integration.md:16-83` | `checkpoint.py:248-715` 已新增 `TFileManager`；`CheckpointManager` 仅保留兼容层（`checkpoint.py:765-834`）。但 `main.py:867-882`、`1170-1185` 仍在调用一个已经不存在的 `check_and_compress()`。 | ⚠️ 部分实现 |
-| 2 | `on_llm_request` 中读取 T、追加新消息、压缩、替换 `req.contexts`。`QQBotPlan/Plan_2_CP_integration.md:87-159` | `main.py:2668-2712` 与文档基本一致。 | ✅ 已实现 |
-| 3 | 同步触发删除旧 `check_and_compress`；`_build_judgment_prompt` 改为从 T 取上下文。`QQBotPlan/Plan_2_CP_integration.md:163-190` | 未完成。`main.py:867-882` 与 `1170-1185` 仍调用旧接口；`main.py:738-748`、`903-909`、`1044-1055` 仍使用 `_get_recent_context()`；而 `_get_recent_context()` 继续读 `messages.db`（`main.py:2274-2338`）。 | ❌ 未实现 |
-| 4 | “LLM 回复后回写 T 文件”在延迟持久化逻辑中补写。`QQBotPlan/Plan_2_CP_integration.md:193-214` | 延迟持久化逻辑仍只写 `messages.db`（`main.py:2546-2597`、`2344-2398`），没有在该处调用 `append_messages()` 写 T。功能只能通过下一轮 `on_llm_request` 间接补齐。 | ⚠️ 部分实现 |
-| 5 | Knowledge 逻辑不变，但 FlashLite 上下文来源改为 T。`QQBotPlan/Plan_2_CP_integration.md:217-235` | Knowledge 更新逻辑还在（`main.py:759-769`、`1066-1074`），但其输入上下文仍来自 `_get_recent_context()` 的 `messages.db`。 | ⚠️ 部分实现 |
-| 6 | `agent.py` 删除 `_get_checkpoint_summary`，`build_contents` 暂保留不用。`QQBotPlan/Plan_2_CP_integration.md:239-252` | `build_contents()` 确实未被任何地方调用（仅定义于 `agent.py:98`）；但 `_get_checkpoint_summary()` 没删除，而是保留废弃桩返回 `None`（`agent.py:207-213`）。 | ⚠️ 部分实现 |
-| 7 | 面板新增压缩参数，`main.py` 初始化 `TFileManager`。`QQBotPlan/Plan_2_CP_integration.md:255-274` | `main.py:158-164` 已初始化 `TFileManager`；前后端也已新增 6 个字段（`models.py:157-165,175-210`，`index.html:422-460`，`app.js:1354-1383`）。但首个参数名称仍是 `checkpoint_limit`，与主链路读取名不一致。 | ⚠️ 部分实现 |
+| 1 | `checkpoint.py` 重写，新增 `TFileManager`，旧逻辑退场。`QQBotPlan/Plan_2/Plan_2_CP_integration.md:16-83` | `checkpoint.py:248-715` 已新增 `TFileManager`；`CheckpointManager` 仅保留兼容层（`checkpoint.py:765-834`）。但 `main.py:867-882`、`1170-1185` 仍在调用一个已经不存在的 `check_and_compress()`。 | ⚠️ 部分实现 |
+| 2 | `on_llm_request` 中读取 T、追加新消息、压缩、替换 `req.contexts`。`QQBotPlan/Plan_2/Plan_2_CP_integration.md:87-159` | `main.py:2668-2712` 与文档基本一致。 | ✅ 已实现 |
+| 3 | 同步触发删除旧 `check_and_compress`；`_build_judgment_prompt` 改为从 T 取上下文。`QQBotPlan/Plan_2/Plan_2_CP_integration.md:163-190` | 未完成。`main.py:867-882` 与 `1170-1185` 仍调用旧接口；`main.py:738-748`、`903-909`、`1044-1055` 仍使用 `_get_recent_context()`；而 `_get_recent_context()` 继续读 `messages.db`（`main.py:2274-2338`）。 | ❌ 未实现 |
+| 4 | “LLM 回复后回写 T 文件”在延迟持久化逻辑中补写。`QQBotPlan/Plan_2/Plan_2_CP_integration.md:193-214` | 延迟持久化逻辑仍只写 `messages.db`（`main.py:2546-2597`、`2344-2398`），没有在该处调用 `append_messages()` 写 T。功能只能通过下一轮 `on_llm_request` 间接补齐。 | ⚠️ 部分实现 |
+| 5 | Knowledge 逻辑不变，但 FlashLite 上下文来源改为 T。`QQBotPlan/Plan_2/Plan_2_CP_integration.md:217-235` | Knowledge 更新逻辑还在（`main.py:759-769`、`1066-1074`），但其输入上下文仍来自 `_get_recent_context()` 的 `messages.db`。 | ⚠️ 部分实现 |
+| 6 | `agent.py` 删除 `_get_checkpoint_summary`，`build_contents` 暂保留不用。`QQBotPlan/Plan_2/Plan_2_CP_integration.md:239-252` | `build_contents()` 确实未被任何地方调用（仅定义于 `agent.py:98`）；但 `_get_checkpoint_summary()` 没删除，而是保留废弃桩返回 `None`（`agent.py:207-213`）。 | ⚠️ 部分实现 |
+| 7 | 面板新增压缩参数，`main.py` 初始化 `TFileManager`。`QQBotPlan/Plan_2/Plan_2_CP_integration.md:255-274` | `main.py:158-164` 已初始化 `TFileManager`；前后端也已新增 6 个字段（`models.py:157-165,175-210`，`index.html:422-460`，`app.js:1354-1383`）。但首个参数名称仍是 `checkpoint_limit`，与主链路读取名不一致。 | ⚠️ 部分实现 |
 
 ## 五、指定问题回答
 
@@ -80,7 +80,7 @@
 
 **结论：⚠️ 间接实现，未按集成文档指定方式实现。**
 
-- 文档要求是在延迟持久化逻辑里顺手调用 `append_messages()` 写入 T。见 `QQBotPlan/Plan_2_CP_integration.md:193-214`。
+- 文档要求是在延迟持久化逻辑里顺手调用 `append_messages()` 写入 T。见 `QQBotPlan/Plan_2/Plan_2_CP_integration.md:193-214`。
 - 实际代码在 `main.py:2546-2597` 只调用 `_persist_bot_reply()`，而 `_persist_bot_reply()` 只写 `messages.db`（`main.py:2344-2398`）。
 - 但 `main.py:2686-2690` 会在下一次 `on_llm_request` 从 A 系统的 `req.contexts` 增量提取消息再写入 T，因此上一轮 assistant/tool 消息大概率会在“下一轮请求开始时”补录到 T。
 - 所以功能效果不是完全没有，但不是“回复完成即回写”，也没有保证与工具调用链严格同步。
@@ -143,7 +143,7 @@ recent_context = self._t_file_mgr.build_flashlite_context(t_file, max_tokens=800
 - **修复建议**：至少比对尾部若干条消息的 `role/content/tool_call_id`，发现不一致时做重扫或回退。
 
 ### 建议 3：文档与默认值需要同步
-- **位置**：`QQBotPlan/Plan_2_CP_compression.md:19-26`，`AstrBot/data/plugins/astrbot_plugin_flashlite/config.json:9,21-25`
+- **位置**：`QQBotPlan/Plan_2/Plan_2_CP_compression.md:19-26`，`AstrBot/data/plugins/astrbot_plugin_flashlite/config.json:9,21-25`
 - **描述**：文档默认值仍写 50000/10/0.7，但仓库实际配置是 10000/15/0.6。
 - **修复建议**：要么更新文档默认值，要么回调配置，避免面板、配置和设计说明三份数字同时存在。
 

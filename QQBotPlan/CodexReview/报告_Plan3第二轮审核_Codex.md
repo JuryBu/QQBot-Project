@@ -6,9 +6,9 @@
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/cost_tracker.py`  
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/_conf_schema.json`  
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/kv_cache.py`  
-- `QQBotPlan/test_stage6_kvcache_all.py`  
-- `QQBotPlan/test_stage7_9_sampling.py`  
-- `QQBotPlan/test_stage11_cost_tracker.py`  
+- `QQBotPlan/Plan_3/test_stage6_kvcache_all.py`  
+- `QQBotPlan/Plan_3/test_stage7_9_sampling.py`  
+- `QQBotPlan/Plan_3/test_stage11_cost_tracker.py`  
 
 **整体评价**: 第一轮的核心修复大部分已落地（含主模型记账接入、配置兼容、写盘 debounce、cleanup 接线），但仍有 2 个高风险问题与 4 个中风险问题，当前代码尚不建议按“成本监控完全闭环”标准直接验收。
 
@@ -104,9 +104,9 @@
 ## 六、测试与验证记录
 
 - 已执行并通过（设置 `PYTHONIOENCODING=utf-8` 后）：
-  - `python QQBotPlan/test_stage6_kvcache_all.py`
-  - `python QQBotPlan/test_stage7_9_sampling.py`
-  - `python QQBotPlan/test_stage11_cost_tracker.py`
+  - `python QQBotPlan/Plan_3/test_stage6_kvcache_all.py`
+  - `python QQBotPlan/Plan_3/test_stage7_9_sampling.py`
+  - `python QQBotPlan/Plan_3/test_stage11_cost_tracker.py`
 - 语法检查通过：
   - `python -m py_compile AstrBot/data/plugins/astrbot_plugin_flashlite/main.py AstrBot/data/plugins/astrbot_plugin_flashlite/cost_tracker.py AstrBot/data/plugins/astrbot_plugin_flashlite/kv_cache.py`
 

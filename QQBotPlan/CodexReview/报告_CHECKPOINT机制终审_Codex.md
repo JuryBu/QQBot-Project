@@ -1,7 +1,7 @@
 ﻿# CHECKPOINT 机制终审报告（Codex）
 
 **审核时间**: 2026-04-11  
-**审核范围**: `QQBotPlan/Plan_2_CP*`、`QQBotPlan/CHECKPOINT机制讨论记录.md`、`AstrBot/data/plugins/astrbot_plugin_flashlite/{checkpoint.py,main.py,agent.py}`、`BossLady_Console` 前后端参数链路  
+**审核范围**: `QQBotPlan/Plan_2/Plan_2_CP*`、`QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md`、`AstrBot/data/plugins/astrbot_plugin_flashlite/{checkpoint.py,main.py,agent.py}`、`BossLady_Console` 前后端参数链路  
 **整体结论**: **核心 CHECKPOINT 重构已落地（T 文件三系统分立、压缩主链路、面板参数链路基本完成），但在“同窗口并发数据完整性”和“严格压缩率保证”上仍有关键缺口，当前结论为“可用但未达到终审关闭标准”。**
 
 ---
@@ -10,15 +10,15 @@
 
 | 设计文档 | 核对结论 | 说明 |
 |---|---|---|
-| `QQBotPlan/CHECKPOINT机制讨论记录.md` | **部分实现** | 三系统分立与 T 文件主链路已实现；但“消息不丢失/不重复”的并发场景仍有缺口（见 High-1/High-2）。 |
-| `QQBotPlan/Plan_2_CP.md` | **部分实现** | 决策 1~8、10 基本落地；决策 9“压缩率严格保证”仍为软校验（见 Medium-2）。 |
-| `QQBotPlan/Plan_2_CP_architecture.md` | **已实现** | FlashLite/主模型上下文均切到 T 文件；`req.contexts` 在 `on_llm_request` 被替换。 |
-| `QQBotPlan/Plan_2_CP_T_file.md` | **部分实现** | T 文件结构、原子写入、per-window lock 已实现；但增量提取未做内容对齐/指纹兜底。 |
-| `QQBotPlan/Plan_2_CP_compression.md` | **部分实现** | 三重守卫、前比例压缩、动态 `maxOutputTokens` 已实现；下限/区间仍非硬约束。 |
-| `QQBotPlan/Plan_2_CP_integration.md` | **部分实现** | `on_llm_request` 替换上下文、触发判断改读 T 文件已实现；“回复后回写 T”仍是启发式补录，鲁棒性不足。 |
-| `QQBotPlan/Plan_2_CP_缺漏_P0P1.md` | **部分实现** | P0 关键项已基本处理（参数命名兼容、旧调用移除、边界切割修复）；P1 数据完整性项未彻底收口。 |
-| `QQBotPlan/Plan_2_CP_缺漏_P2优化.md` | **部分实现** | 并发合并式 Save、参数校验等已实现；增量提取健壮化与部分清理项未完成。 |
-| `QQBotPlan/Plan_2_CP_P2_3_并发安全.md` | **部分实现** | “压缩期间中间消息合并”已实现；但“同窗口并发进入 load→extract→append”仍可重复追加。 |
+| `QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md` | **部分实现** | 三系统分立与 T 文件主链路已实现；但“消息不丢失/不重复”的并发场景仍有缺口（见 High-1/High-2）。 |
+| `QQBotPlan/Plan_2/Plan_2_CP.md` | **部分实现** | 决策 1~8、10 基本落地；决策 9“压缩率严格保证”仍为软校验（见 Medium-2）。 |
+| `QQBotPlan/Plan_2/Plan_2_CP_architecture.md` | **已实现** | FlashLite/主模型上下文均切到 T 文件；`req.contexts` 在 `on_llm_request` 被替换。 |
+| `QQBotPlan/Plan_2/Plan_2_CP_T_file.md` | **部分实现** | T 文件结构、原子写入、per-window lock 已实现；但增量提取未做内容对齐/指纹兜底。 |
+| `QQBotPlan/Plan_2/Plan_2_CP_compression.md` | **部分实现** | 三重守卫、前比例压缩、动态 `maxOutputTokens` 已实现；下限/区间仍非硬约束。 |
+| `QQBotPlan/Plan_2/Plan_2_CP_integration.md` | **部分实现** | `on_llm_request` 替换上下文、触发判断改读 T 文件已实现；“回复后回写 T”仍是启发式补录，鲁棒性不足。 |
+| `QQBotPlan/Plan_2/Plan_2_CP_缺漏_P0P1.md` | **部分实现** | P0 关键项已基本处理（参数命名兼容、旧调用移除、边界切割修复）；P1 数据完整性项未彻底收口。 |
+| `QQBotPlan/Plan_2/Plan_2_CP_缺漏_P2优化.md` | **部分实现** | 并发合并式 Save、参数校验等已实现；增量提取健壮化与部分清理项未完成。 |
+| `QQBotPlan/Plan_2/Plan_2_CP_P2_3_并发安全.md` | **部分实现** | “压缩期间中间消息合并”已实现；但“同窗口并发进入 load→extract→append”仍可重复追加。 |
 
 ---
 

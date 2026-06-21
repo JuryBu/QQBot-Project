@@ -8,6 +8,6 @@
 - `/api/data/sandbox/tree` 的路径校验又回到了前缀匹配，存在同前缀兄弟目录逃逸风险。[data.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routes/data.py#L139)
 
 **报告**
-审查报告已保存到 [报告_Stage11-12_Web控制台_Codex.md](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/报告_Stage11-12_Web控制台_Codex.md)。
+审查报告已保存到 [报告_Stage11-12_Web控制台_Codex.md](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/CodexReview/报告_Stage11-12_Web控制台_Codex.md)。
 
 我做了路由级验证，确认高优先级问题都能在当前仓库直接复现；关键结论也已写入记忆系统，后续如果你要我继续修这批问题，我建议先按“鉴权/暴露面 → 数据桥接 → NapCat/Persona/前端完成度”这个顺序收敛。

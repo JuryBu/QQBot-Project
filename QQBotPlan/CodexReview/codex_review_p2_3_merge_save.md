@@ -28,9 +28,9 @@
 - 检查 `config.get("checkpoint_limit", config.get("checkpoint_token_limit", 50000))`
 
 ## 对照设计文档
-- `QQBotPlan/Plan_2_CP_P2_3_并发安全.md` — 刚固化的并发安全方案
-- `QQBotPlan/CHECKPOINT机制讨论记录.md` — 原始设计理念
-- `QQBotPlan/Plan_2_CP_compression.md` — 压缩逻辑规范
+- `QQBotPlan/Plan_2/Plan_2_CP_P2_3_并发安全.md` — 刚固化的并发安全方案
+- `QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md` — 原始设计理念
+- `QQBotPlan/Plan_2/Plan_2_CP_compression.md` — 压缩逻辑规范
 
 ## 额外检查
 - 工具消息（tool_calls/tool/tool_call_id）在 append_messages 和 _extract_new_messages 中是否正确处理

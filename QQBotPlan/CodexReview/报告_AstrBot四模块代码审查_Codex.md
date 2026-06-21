@@ -8,7 +8,7 @@
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py`
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/agent.py`
 - 集成链路补充核对：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py`
-**范围假设**: 由于本轮对话未附具体模块列表，本报告按 `QQBotPlan/Task.md` 的 Stage 7-10 四个模块审查：`KV Cache`、`Memory + Knowledge`、`Sandbox`、`Agent`
+**范围假设**: 由于本轮对话未附具体模块列表，本报告按 `QQBotPlan/Plan_1/Task.md` 的 Stage 7-10 四个模块审查：`KV Cache`、`Memory + Knowledge`、`Sandbox`、`Agent`
 **整体评价**: 代码已具备原型形态，但 Stage 7-10 与 `Task.md` 中“核心完成”的状态不符；当前最大风险不在语法，而在“未真正接线”和“安全边界失效”。
 
 ## 🔴 严重问题（必须修复）
@@ -18,7 +18,7 @@
 - **描述**：
   当前实现用 `real_path.startswith(self._root)` 判断路径是否仍在 Sandbox 内。这在 Windows 路径上是不安全的字符串前缀判断。
   例如根目录为 `...\Sandbox` 时，`..\Sandbox_evil\poc.txt` 解析后的真实路径是 `...\Sandbox_evil\poc.txt`，仍然会满足 `startswith("...\Sandbox") == True`。
-  这会直接破坏 `QQBotPlan/Plan_1_sandbox.md:60-81` 所承诺的“Sandbox 外部绝对禁止 AI 触碰”和“路径逃逸检测”。
+  这会直接破坏 `QQBotPlan/Plan_1/Plan_1_sandbox.md:60-81` 所承诺的“Sandbox 外部绝对禁止 AI 触碰”和“路径逃逸检测”。
 - **影响**：
   攻击者可以通过构造相邻目录名，绕过路径白名单，读取或写入 Sandbox 外部文件。
 - **修复建议**：
@@ -35,7 +35,7 @@
 ### 问题 2：`sandbox_exec` 并没有真正实现“沙盒化执行”，执行脚本仍可直接访问宿主文件系统和网络
 - **位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:221-260`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:291-313`
-- **设计对照**：`QQBotPlan/Plan_1_sandbox.md:60-81`, `QQBotPlan/Plan_1_sandbox.md:94-99`
+- **设计对照**：`QQBotPlan/Plan_1/Plan_1_sandbox.md:60-81`, `QQBotPlan/Plan_1/Plan_1_sandbox.md:94-99`
 - **描述**：
   `exec_code()` 只是把脚本写到 Sandbox 目录，再用宿主机上的 Python/Node/Bash 解释器启动子进程。它没有任何 OS 级隔离，也没有限制脚本本身对宿主文件系统、网络、进程的访问。
   具体问题包括：
@@ -54,7 +54,7 @@
 ### 问题 3：只读策略存在绕过，`system_report` 常态可写，`exec_code(cwd=...)` 还能把临时脚本写进只读目录
 - **位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:83-90`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:221-242`
-- **设计对照**：`QQBotPlan/Plan_1_sandbox.md:69-73`, `QQBotPlan/Plan_1_sandbox.md:155-158`
+- **设计对照**：`QQBotPlan/Plan_1/Plan_1_sandbox.md:69-73`, `QQBotPlan/Plan_1/Plan_1_sandbox.md:155-158`
 - **描述**：
   1. `validate_path(..., allow_write=True)` 对 `base_tools/system_report/` 直接放行，没有任何“仅 Review 时开放”的运行时条件。
   2. `exec_code()` 对 `cwd` 只做了 `resolve_path()`，没有做写权限校验；随后会把 `_sandbox_exec.py/.js/.sh` 直接写入该目录。
@@ -70,7 +70,7 @@
 - **位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:30-40`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:109-118`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:648-682`
-- **对照任务状态**：`QQBotPlan/Task.md:77-88`, `QQBotPlan/Task.md:122-130`
+- **对照任务状态**：`QQBotPlan/Plan_1/Task.md:77-88`, `QQBotPlan/Plan_1/Task.md:122-130`
 - **描述**：
   `main.py` 虽然导入了 `KVCacheManager` 和 `AgentRequestBuilder`，但初始化阶段只实例化了 `CheckpointManager`、`KnowledgeCache`、`MemoryStore`。
   实际运行链路里：
@@ -110,8 +110,8 @@
 - **位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:173-197`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:203-247`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:253-261`
-- **设计对照**：`QQBotPlan/Plan_1_memory.md:36-39`
-- **任务对照**：`QQBotPlan/Task.md:95-100`
+- **设计对照**：`QQBotPlan/Plan_1/Plan_1_memory.md:36-39`
+- **任务对照**：`QQBotPlan/Plan_1/Task.md:95-100`
 - **描述**：
   `query()` 支持按 `workspace` 过滤，但 `read()`、`update()`、`delete()` 全都只按 `mem_id` 操作，不要求调用方提供工作区。
   这意味着一旦某个窗口拿到另一工作区的 `mem_id`，就可以跨群读取、修改、删除长期记忆。
@@ -139,7 +139,7 @@
 - **位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/knowledge.py:28-31`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/knowledge.py:146-181`
 - **补充位置**：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:660-663`
-- **设计对照**：`QQBotPlan/Plan_1_memory.md:97-101`
+- **设计对照**：`QQBotPlan/Plan_1/Plan_1_memory.md:97-101`
 - **描述**：
   当前代码允许最多 20 个窗口、每个窗口 500 字，再加参与者和操作记录；但没有任何总 token 上限控制。按中文场景估算，很容易超过文档设计的 `2000-3000 token` 预算。
 - **修复建议**：
@@ -164,7 +164,7 @@
 ## 🟢 微调建议
 
 ### 问题 11：当前四模块缺少可执行自动化测试，现有验证主要停留在 Markdown 测试方案
-- **位置**：`QQBotPlan/Test_Stage6_8_integration.md:60-180`
+- **位置**：`QQBotPlan/Plan_1/Test_Stage6_8_integration.md:60-180`
 - **描述**：
   仓库内未发现这四个模块对应的单元测试/集成测试代码；目前更多是“测试计划文档”，缺少 CI 可执行断言。
 - **修复建议**：

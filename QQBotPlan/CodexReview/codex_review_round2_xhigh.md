@@ -1,6 +1,6 @@
 详细第二轮审核报告已生成并保存到：
 
-- [报告_Plan3第二轮审核_Codex.md](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/报告_Plan3第二轮审核_Codex.md)
+- [报告_Plan3第二轮审核_Codex.md](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/CodexReview/报告_Plan3第二轮审核_Codex.md)
 
 结论要点：
 

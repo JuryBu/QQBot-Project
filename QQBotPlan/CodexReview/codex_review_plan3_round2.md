@@ -16,14 +16,14 @@
 - `QQBotPlan/Plan_3_1_KVCache优化.md` — KVCache 优化设计文档
 - `QQBotPlan/Plan_3_2_采样优化.md` — 采样优化设计文档
 - `QQBotPlan/Plan_3_3_CostTracker成本监控.md` — 成本监控设计文档
-- `QQBotPlan/Plan_3_4_面板与成本监控.md` — 面板配置设计文档
-- `QQBotPlan/Task_3.md` — 任务清单含全部 Stage 描述
-- `QQBotPlan/报告_Plan3审核_Codex.md` — 第一轮 Codex Review 报告
+- `QQBotPlan/Plan_3/Plan_3_4_面板与成本监控.md` — 面板配置设计文档
+- `QQBotPlan/Plan_3/Task_3.md` — 任务清单含全部 Stage 描述
+- `QQBotPlan/CodexReview/报告_Plan3审核_Codex.md` — 第一轮 Codex Review 报告
 
 ### 测试文件
-- `QQBotPlan/test_stage6_kvcache_all.py`
-- `QQBotPlan/test_stage7_9_sampling.py`
-- `QQBotPlan/test_stage11_cost_tracker.py`
+- `QQBotPlan/Plan_3/test_stage6_kvcache_all.py`
+- `QQBotPlan/Plan_3/test_stage7_9_sampling.py`
+- `QQBotPlan/Plan_3/test_stage11_cost_tracker.py`
 
 ## 第一轮修复内容（需确认已正确修复）
 1. **window_key 传递** — route_message 中设置 self._current_window_key

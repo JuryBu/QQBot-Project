@@ -8,9 +8,9 @@
 - `BossLady_Console/backend/routers/models.py`
 - `BossLady_Console/backend/routers/cost.py`
 - `BossLady_Console/frontend/app.js`
-- `QQBotPlan/test_stage6_kvcache_all.py`
-- `QQBotPlan/test_stage7_9_sampling.py`
-- `QQBotPlan/test_stage11_cost_tracker.py`
+- `QQBotPlan/Plan_3/test_stage6_kvcache_all.py`
+- `QQBotPlan/Plan_3/test_stage7_9_sampling.py`
+- `QQBotPlan/Plan_3/test_stage11_cost_tracker.py`
 
 **整体评价**: Plan_3 主线功能（KVCache 分离、动态采样、成本记录）基本可用，但仍有并发归因与停机刷盘两类高风险缺口，且控制台配置链路与插件运行参数仍存在明显脱节。
 
@@ -75,12 +75,12 @@
 
 ### 问题 7：Plan_3 测试脚本可移植性差，默认 Windows GBK 环境下会假失败
 - **位置**：
-  - `QQBotPlan/test_stage6_kvcache_all.py:4`
-  - `QQBotPlan/test_stage7_9_sampling.py:4`
-  - `QQBotPlan/test_stage11_cost_tracker.py:10`
-  - `QQBotPlan/test_stage6_kvcache_all.py:35`
-  - `QQBotPlan/test_stage7_9_sampling.py:23`
-  - `QQBotPlan/test_stage11_cost_tracker.py:39`
+  - `QQBotPlan/Plan_3/test_stage6_kvcache_all.py:4`
+  - `QQBotPlan/Plan_3/test_stage7_9_sampling.py:4`
+  - `QQBotPlan/Plan_3/test_stage11_cost_tracker.py:10`
+  - `QQBotPlan/Plan_3/test_stage6_kvcache_all.py:35`
+  - `QQBotPlan/Plan_3/test_stage7_9_sampling.py:23`
+  - `QQBotPlan/Plan_3/test_stage11_cost_tracker.py:39`
 - **描述**：测试脚本写死本机绝对路径，且输出 `✅` 在默认 GBK 控制台会抛 `UnicodeEncodeError`。
 - **修复建议**：改为相对路径（基于 `__file__` 推导）；打印改 ASCII 或在脚本入口统一设置 UTF-8 输出。
 
@@ -103,9 +103,9 @@
   - `python -m py_compile BossLady_Console/backend/routers/models.py`
   - `python -m py_compile BossLady_Console/backend/routers/cost.py`
 - Plan_3 测试脚本在 `PYTHONIOENCODING=utf-8` 下可通过：
-  - `python QQBotPlan/test_stage6_kvcache_all.py`
-  - `python QQBotPlan/test_stage7_9_sampling.py`
-  - `python QQBotPlan/test_stage11_cost_tracker.py`
+  - `python QQBotPlan/Plan_3/test_stage6_kvcache_all.py`
+  - `python QQBotPlan/Plan_3/test_stage7_9_sampling.py`
+  - `python QQBotPlan/Plan_3/test_stage11_cost_tracker.py`
 
 ## 结论
 优先修复顺序建议：

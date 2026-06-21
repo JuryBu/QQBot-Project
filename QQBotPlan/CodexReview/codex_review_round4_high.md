@@ -2,7 +2,7 @@
 
 **审核时间**: 2026-04-13
 **审核范围**:
-- `QQBotPlan/Plan_3*.md`
+- `QQBotPlan/Plan_3/Plan_3*.md`
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/main.py`
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py`
 - `BossLady_Console/frontend/index.html`

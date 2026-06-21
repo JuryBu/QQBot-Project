@@ -399,7 +399,7 @@ summary API (cost.py L88) 统计的 `flashlite_calls` 包含所有 `call_type.st
 
 ## 十三、🔴 定价系统全面审计：价格错误 + 结构性缺陷
 
-> **参考材料**：`QQBotPlan/参考材料_Gemini_API_定价表.md`（2026-04-13 从官方获取）
+> **参考材料**：`QQBotPlan/辅助/参考材料_Gemini_API_定价表.md`（2026-04-13 从官方获取）
 > **涉及文件**：`cost_tracker.py` L27-64
 
 ### 13.1 代码 vs 官方 逐条对比

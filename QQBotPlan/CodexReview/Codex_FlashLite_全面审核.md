@@ -25,8 +25,8 @@
 - `QQBotPlan/提示词审计/Prompt_工具模型.md` — 工具模型子代理提示词
 
 ### 设计文档（辅助参考）
-- `QQBotPlan/Plan_2.md` — Plan 2 总纲
-- `QQBotPlan/Plan_2_2.md` — 提示词系统重构
+- `QQBotPlan/Plan_2/Plan_2.md` — Plan 2 总纲
+- `QQBotPlan/Plan_2/Plan_2_2.md` — 提示词系统重构
 
 ## 审核要求
 

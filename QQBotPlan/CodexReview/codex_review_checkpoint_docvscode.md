@@ -7,11 +7,11 @@
 
 ### 步骤 1：提取文档中的所有设计决策
 从以下文档提取所有明确的设计承诺：
-- `QQBotPlan/Plan_2_CP.md` — 已确认决策清单（10 条）
-- `QQBotPlan/Plan_2_CP_architecture.md` — 三系统分立架构
-- `QQBotPlan/Plan_2_CP_T_file.md` — T 文件格式规范
-- `QQBotPlan/Plan_2_CP_compression.md` — 压缩触发参数表
-- `QQBotPlan/Plan_2_CP_integration.md` — 代码修改清单
+- `QQBotPlan/Plan_2/Plan_2_CP.md` — 已确认决策清单（10 条）
+- `QQBotPlan/Plan_2/Plan_2_CP_architecture.md` — 三系统分立架构
+- `QQBotPlan/Plan_2/Plan_2_CP_T_file.md` — T 文件格式规范
+- `QQBotPlan/Plan_2/Plan_2_CP_compression.md` — 压缩触发参数表
+- `QQBotPlan/Plan_2/Plan_2_CP_integration.md` — 代码修改清单
 
 ### 步骤 2：逐条验证代码实现
 对每个决策/规范，在以下代码中验证是否已实现：

@@ -2,7 +2,7 @@
 
 **审核时间**: 2026-04-13
 **审核范围**:
-- 规划文档：`QQBotPlan/Task.md`、`QQBotPlan/Plan_1_sandbox.md`、`QQBotPlan/Plan_1_memory.md`
+- 规划文档：`QQBotPlan/Plan_1/Task.md`、`QQBotPlan/Plan_1/Plan_1_sandbox.md`、`QQBotPlan/Plan_1/Plan_1_memory.md`
 - 核心实现：`AstrBot/data/plugins/astrbot_plugin_flashlite/{main.py,sandbox.py,web_engine.py,memory.py}`
 - 控制台后端：`BossLady_Console/backend/{main.py,routers/models.py,routers/bot.py,routes/messages.py,routes/system.py}`
 **整体评价**: 当前系统在“安全边界与数据隔离”上仍存在体系级缺口，尤其是控制台鉴权、Sandbox 外部隔离、Memory 工作区隔离和文件路径安全，需优先修复。
@@ -27,7 +27,7 @@
 
 ### 问题 2：Sandbox 边界失效，可读取/执行 Sandbox 外部资源（与设计硬约束冲突）
 - **位置**：
-  - 设计约束：`QQBotPlan/Plan_1_sandbox.md:60-63,68,77-81`
+  - 设计约束：`QQBotPlan/Plan_1/Plan_1_sandbox.md:60-63,68,77-81`
   - 执行链路：`AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:641-679,693-708,750-766`
   - 本地文件读取：`AstrBot/data/plugins/astrbot_plugin_flashlite/web_engine.py:246-279,288-293`
   - 工具暴露：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:3903-3917`
@@ -42,7 +42,7 @@
 
 ### 问题 3：Memory 工作区隔离被绕过，跨窗口读写风险真实存在
 - **位置**：
-  - 设计要求：`QQBotPlan/Plan_1_memory.md:36-39`
+  - 设计要求：`QQBotPlan/Plan_1/Plan_1_memory.md:36-39`
   - 全局召回：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:920-927,1059-1066,1209-1216,1316-1333`
   - 工具读写：`AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:3627,3678,3791`
   - 存储层兜底缺失：`AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:672-680,733-736,756-764`

@@ -1,4 +1,4 @@
-本次按 `QQBotPlan` 的 Stage 3-5，将三个插件视为 `context_enhancer`、`persistence`、`flashlite` 进行了全面审查。完整报告已保存到 [报告_AstrBot三插件代码审查_Codex.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/报告_AstrBot三插件代码审查_Codex.md)。
+本次按 `QQBotPlan` 的 Stage 3-5，将三个插件视为 `context_enhancer`、`persistence`、`flashlite` 进行了全面审查。完整报告已保存到 [报告_AstrBot三插件代码审查_Codex.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/CodexReview/报告_AstrBot三插件代码审查_Codex.md)。
 
 主要问题先看这 4 个：
 - 🔴 `flashlite` 的核心触发时序是错的：它在 [main.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py) 里用 `asyncio.create_task()` 后台改 `event.is_at_or_wake_command`，但 AstrBot 会在 [stage.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/astrbot/core/pipeline/process_stage/stage.py) 当前 handler 返回后立刻决定是否进入主模型，导致当前轮消息大概率不会被它真正唤醒。

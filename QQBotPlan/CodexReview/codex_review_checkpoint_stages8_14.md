@@ -11,14 +11,14 @@
 3. `BossLady_Console/backend/routers/models.py` — 后端参数校验
 
 ### 需要对照的设计文档（原始需求来源）
-1. `QQBotPlan/CHECKPOINT机制讨论记录.md` — 原始讨论和核心设计理念
-2. `QQBotPlan/Plan_2_CP.md` — 总纲索引
-3. `QQBotPlan/Plan_2_CP_architecture.md` — 三系统分立架构
-4. `QQBotPlan/Plan_2_CP_T_file.md` — T 文件结构规范
-5. `QQBotPlan/Plan_2_CP_compression.md` — 压缩逻辑规范
-6. `QQBotPlan/Plan_2_CP_integration.md` — 集成方案
-7. `QQBotPlan/Plan_2_CP_缺漏_P0P1.md` — P0P1 缺漏清单
-8. `QQBotPlan/Plan_2_CP_缺漏_P2优化.md` — P2 优化清单
+1. `QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md` — 原始讨论和核心设计理念
+2. `QQBotPlan/Plan_2/Plan_2_CP.md` — 总纲索引
+3. `QQBotPlan/Plan_2/Plan_2_CP_architecture.md` — 三系统分立架构
+4. `QQBotPlan/Plan_2/Plan_2_CP_T_file.md` — T 文件结构规范
+5. `QQBotPlan/Plan_2/Plan_2_CP_compression.md` — 压缩逻辑规范
+6. `QQBotPlan/Plan_2/Plan_2_CP_integration.md` — 集成方案
+7. `QQBotPlan/Plan_2/Plan_2_CP_缺漏_P0P1.md` — P0P1 缺漏清单
+8. `QQBotPlan/Plan_2/Plan_2_CP_缺漏_P2优化.md` — P2 优化清单
 
 ## 各 Stage 审核要点
 

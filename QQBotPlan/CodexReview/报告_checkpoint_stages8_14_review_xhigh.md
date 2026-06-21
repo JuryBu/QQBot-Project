@@ -15,4 +15,4 @@
 完整中文报告已保存：  
 [`报告_CHECKPOINT重构Stage8-14审核_Codex.md`](C:\Users\<user>\Desktop\AstrBotLauncher-0.1.5.6\docs\AI协作\本地Agent\进行中\报告_CHECKPOINT重构Stage8-14审核_Codex.md)
 
-补充：尝试运行 `python -m pytest -q QQBotPlan/test_codex_fixes.py QQBotPlan/test_stage13_e2e.py`，当前环境未安装 `pytest`，未能执行自动化验证。
+补充：尝试运行 `python -m pytest -q QQBotPlan/Plan_1/test_codex_fixes.py QQBotPlan/Plan_1/test_stage13_e2e.py`，当前环境未安装 `pytest`，未能执行自动化验证。

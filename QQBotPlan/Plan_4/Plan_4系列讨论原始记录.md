@@ -326,7 +326,7 @@ Used MCP tool: memory-store/memory_write
 - `knowledge.py` — 注释修正 `PrivateMessage` → `FriendMessage`
 
 **文档产出**（2 份）：
-- `QQBotPlan/Report_3_final.md` — Codex 四进程审查的逐项调研报告
+- `QQBotPlan/Plan_3/Report_3_final.md` — Codex 四进程审查的逐项调研报告
 - `QQBotPlan/Plan_4.md` — 未来优化路线图，包含：
   1. **向量化混合推荐**（并行双路 + FlashLite 融合）
   2. **MCP/SKILL 导入体系**（只读工具文件夹 + 面板管理）

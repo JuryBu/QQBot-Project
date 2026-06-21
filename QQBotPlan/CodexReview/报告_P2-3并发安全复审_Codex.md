@@ -5,7 +5,7 @@
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py`
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/main.py`
 - `BossLady_Console/backend/routers/models.py`
-- 对照文档：`QQBotPlan/Plan_2_CP_P2_3_并发安全.md`、`QQBotPlan/CHECKPOINT机制讨论记录.md`、`QQBotPlan/Plan_2_CP_compression.md`
+- 对照文档：`QQBotPlan/Plan_2/Plan_2_CP_P2_3_并发安全.md`、`QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md`、`QQBotPlan/Plan_2/Plan_2_CP_compression.md`
 
 **整体评价**: 本轮修复覆盖了主要问题（合并式 Save、assistant 补录来源、去重范围、旧键回退），但并发压缩场景仍存在消息丢失窗口；另有计数策略兼容性与元数据一致性风险未收口。
 

@@ -5,7 +5,7 @@
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/main.py`
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py`
 - `BossLady_Console/backend/routers/models.py`
-- 设计文档：`QQBotPlan/CHECKPOINT机制讨论记录.md`、`Plan_2_CP*.md`、`Plan_2_CP_缺漏_P0P1.md`、`Plan_2_CP_缺漏_P2优化.md`
+- 设计文档：`QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md`、`Plan_2_CP*.md`、`Plan_2_CP_缺漏_P0P1.md`、`Plan_2_CP_缺漏_P2优化.md`
 
 **整体评价**: Stage 8-14 主干需求基本落地（参数统一、旧调用清理、压缩边界修复、T 文件上下文切换、max_tokens 链路、P2 参数校验/提示词/语义分割均已实现），但仍存在 1 个并发一致性严重风险与 1 个 Stage12 回写时序缺陷。
 
@@ -87,5 +87,5 @@
 - 压缩分割已增加 user-assistant 对话对完整性保护。
 
 ## 备注
-- 尝试执行自动化验证：`python -m pytest -q QQBotPlan/test_codex_fixes.py QQBotPlan/test_stage13_e2e.py`
+- 尝试执行自动化验证：`python -m pytest -q QQBotPlan/Plan_1/test_codex_fixes.py QQBotPlan/Plan_1/test_stage13_e2e.py`
 - 当前环境未安装 `pytest`（`No module named pytest`），因此本次结论基于静态审查。

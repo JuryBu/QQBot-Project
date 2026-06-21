@@ -1,4 +1,4 @@
-我按 `QQBotPlan/Task.md` 的 `Stage 7-10` 四模块做了深度审查，完整报告已保存到 [报告_AstrBot四模块代码审查_Codex.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/报告_AstrBot四模块代码审查_Codex.md)。
+我按 `QQBotPlan/Plan_1/Task.md` 的 `Stage 7-10` 四模块做了深度审查，完整报告已保存到 [报告_AstrBot四模块代码审查_Codex.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/CodexReview/报告_AstrBot四模块代码审查_Codex.md)。
 
 主要问题先看这 5 个：
 
@@ -10,7 +10,7 @@
 
 4. `Agent` 读取 CHECKPOINT 的 SQL 和真实 schema 对不上。[agent.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/agent.py#L385) 查询 `compressed_summary` / `version`，但真实表定义在 [persistence/main.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_persistence/main.py#L106) 里只有 `compressed_content`，也没有 `version` 字段，所以这条链即使接上线也会直接失效。
 
-5. `Memory` 的工作区隔离没做完整。[memory.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py#L173)、[memory.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py#L203)、[memory.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py#L253) 的 `read/update/delete` 都只按 `mem_id` 操作，不要求 `workspace`，和 [Plan_1_memory.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_1_memory.md#L36) 里“每个群号/QQ号独立工作区”的设计冲突。
+5. `Memory` 的工作区隔离没做完整。[memory.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py#L173)、[memory.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py#L203)、[memory.py](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py#L253) 的 `read/update/delete` 都只按 `mem_id` 操作，不要求 `workspace`，和 [Plan_1_memory.md](C:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_1/Plan_1_memory.md#L36) 里“每个群号/QQ号独立工作区”的设计冲突。
 
 补充两点：`system_report` 现在是常态可写的，只读策略也能被 `exec_code(cwd=...)` 绕过；另外这几块没有自动化测试，只有文档级测试计划。我已做过 `python -m py_compile` 静态语法检查，语法通过，但没有做真实 AstrBot/QQ 联调。
 

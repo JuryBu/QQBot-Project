@@ -44,7 +44,7 @@
 ## 🟡 建议改进
 
 ### 问题 1：Stage 12 被勾选为“完成”的多项能力，前端实际上仍是只读展示或压根没有入口
-- **位置**：`QQBotPlan/Task.md:157-163`、`QQBotPlan/Plan_1_webui.md:126-163`、`QQBotPlan/Plan_1_webui.md:218-229`、`BossLady_Console/frontend/index.html:203-289`、`BossLady_Console/frontend/app.js:359-510`
+- **位置**：`QQBotPlan/Plan_1/Task.md:157-163`、`QQBotPlan/Plan_1/Plan_1_webui.md:126-163`、`QQBotPlan/Plan_1/Plan_1_webui.md:218-229`、`BossLady_Console/frontend/index.html:203-289`、`BossLady_Console/frontend/app.js:359-510`
 - **描述**：任务文档把 Memory 编辑/导入导出、插件开关/配置、系统导入/安全设置、Knowledge 更新日志、Sandbox Launch Review 等都标成已完成，但前端现在只有查看、搜索、导出、日志读取等有限动作。比如 Memory 页从未调用后端的 `POST/PUT/DELETE /api/data/memory`，系统页没有导入和安全设置入口，插件页只有列表，没有开关/配置入口。
 - **修复建议**：如果这些功能还没做完，应先把 Task 勾选状态回退；如果计划继续保留“已完成”，就需要把交互入口、表单与后端逻辑补齐，避免后续联调阶段误判完成度。
 

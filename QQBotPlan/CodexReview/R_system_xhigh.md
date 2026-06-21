@@ -6,11 +6,11 @@
 建议：加统一鉴权中间件，所有 `/api/*` 强制校验会话/token。
 
 2. 🔴 Sandbox 边界失效：`sandbox_exec` 可回退系统解释器执行任意代码，`web_fetch(file://)` 可读本地任意文件。  
-位置：[Plan_1_sandbox.md:60](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_1_sandbox.md:60)、[sandbox.py:673](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:673)、[sandbox.py:756](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:756)、[web_engine.py:268](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/web_engine.py:268)。  
+位置：[Plan_1_sandbox.md:60](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_1/Plan_1_sandbox.md:60)、[sandbox.py:673](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:673)、[sandbox.py:756](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/sandbox.py:756)、[web_engine.py:268](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/web_engine.py:268)。  
 建议：强制仅 Sandbox 内路径、禁绝系统解释器回退、加进程级隔离。
 
 3. 🔴 Memory 工作区隔离被绕过，存在跨窗口读写/召回。  
-位置：[Plan_1_memory.md:36](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_1_memory.md:36)、[main.py:920](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:920)、[main.py:3627](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:3627)、[memory.py:672](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:672)、[memory.py:756](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:756)。  
+位置：[Plan_1_memory.md:36](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Plan_1/Plan_1_memory.md:36)、[main.py:920](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:920)、[main.py:3627](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:3627)、[memory.py:672](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:672)、[memory.py:756](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/memory.py:756)。  
 建议：工具层强制注入当前 workspace，存储层无 workspace 直接拒绝。
 
 4. 🔴 表情包接口路径未做边界校验，Windows 下可路径穿越导致越权读写删。  

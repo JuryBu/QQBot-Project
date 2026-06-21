@@ -6,15 +6,15 @@
 ## 审核范围
 
 ### 设计文档（必须逐一核对）
-- `QQBotPlan/CHECKPOINT机制讨论记录.md` — 原始设计讨论，包含所有需求和决策
-- `QQBotPlan/Plan_2_CP.md` — CHECKPOINT 总纲
-- `QQBotPlan/Plan_2_CP_architecture.md` — 三系统分立架构
-- `QQBotPlan/Plan_2_CP_T_file.md` — T 文件机制
-- `QQBotPlan/Plan_2_CP_compression.md` — 压缩机制
-- `QQBotPlan/Plan_2_CP_integration.md` — 集成方案
-- `QQBotPlan/Plan_2_CP_缺漏_P0P1.md` — P0/P1 缺漏修复
-- `QQBotPlan/Plan_2_CP_缺漏_P2优化.md` — P2 优化项
-- `QQBotPlan/Plan_2_CP_P2_3_并发安全.md` — 并发安全修复
+- `QQBotPlan/Plan_2/CHECKPOINT机制讨论记录.md` — 原始设计讨论，包含所有需求和决策
+- `QQBotPlan/Plan_2/Plan_2_CP.md` — CHECKPOINT 总纲
+- `QQBotPlan/Plan_2/Plan_2_CP_architecture.md` — 三系统分立架构
+- `QQBotPlan/Plan_2/Plan_2_CP_T_file.md` — T 文件机制
+- `QQBotPlan/Plan_2/Plan_2_CP_compression.md` — 压缩机制
+- `QQBotPlan/Plan_2/Plan_2_CP_integration.md` — 集成方案
+- `QQBotPlan/Plan_2/Plan_2_CP_缺漏_P0P1.md` — P0/P1 缺漏修复
+- `QQBotPlan/Plan_2/Plan_2_CP_缺漏_P2优化.md` — P2 优化项
+- `QQBotPlan/Plan_2/Plan_2_CP_P2_3_并发安全.md` — 并发安全修复
 
 ### 代码文件
 - `AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py` — CHECKPOINT 核心实现
