@@ -11,7 +11,11 @@ router = APIRouter()
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 CMD_CONFIG = PROJECT_ROOT / "AstrBot" / "data" / "cmd_config.json"
-FLASHLITE_CONFIG = PROJECT_ROOT / "AstrBot" / "data" / "plugins" / "astrbot_plugin_flashlite" / "config.json"
+# A 文件：框架按 _conf_schema.json 注入的生效配置（运行时 _raw_config 来源）
+FLASHLITE_CONFIG = PROJECT_ROOT / "AstrBot" / "data" / "config" / "astrbot_plugin_flashlite_config.json"
+# B 文件：persistence 插件 storage_policy 直接读写的物理文件（绕过 schema）
+# storage_policy 端点必须保留写 B 文件，否则 persistence/main.py:_load_storage_policy 读不到
+FLASHLITE_B_CONFIG = PROJECT_ROOT / "AstrBot" / "data" / "plugins" / "astrbot_plugin_flashlite" / "config.json"
 
 
 def _load_cmd_config() -> Dict[str, Any]:
@@ -27,14 +31,28 @@ def _save_cmd_config(config: Dict[str, Any]):
 
 
 def _load_flashlite_config() -> Dict[str, Any]:
+    # A 文件由框架 astrbot_config 以 utf-8-sig(带 BOM) 写入，需对齐否则撞 BOM
     if FLASHLITE_CONFIG.exists():
-        with open(FLASHLITE_CONFIG, "r", encoding="utf-8") as f:
+        with open(FLASHLITE_CONFIG, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     return {}
 
 
 def _save_flashlite_config(config: Dict[str, Any]):
-    with open(FLASHLITE_CONFIG, "w", encoding="utf-8") as f:
+    with open(FLASHLITE_CONFIG, "w", encoding="utf-8-sig") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def _load_flashlite_b_config() -> Dict[str, Any]:
+    # B 文件由 persistence 插件以 utf-8(无 BOM) 读取，专供 storage_policy 端点使用
+    if FLASHLITE_B_CONFIG.exists():
+        with open(FLASHLITE_B_CONFIG, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_flashlite_b_config(config: Dict[str, Any]):
+    with open(FLASHLITE_B_CONFIG, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
@@ -95,19 +113,16 @@ async def get_main_model():
 
     for p in providers:
         if p.get("enable"):
-            model_config = p.get("model_config", {})
+            # 真实生效路径：顶层 model + custom_extra_body.{max_tokens,temperature}
+            # （model_config 是框架死字段，openai_source 不读，已弃用）
+            cb = p.get("custom_extra_body", {})
             result = {
                 "id": p.get("id", ""),
                 "type": p.get("type", ""),
-                "model": model_config.get("model", ""),
-                "max_tokens": model_config.get("max_tokens", 4096),
-                "temperature": model_config.get("temperature", 0.7),
+                "model": p.get("model", ""),
+                "max_tokens": cb.get("max_tokens", 4096),
+                "temperature": cb.get("temperature", 0.7),
             }
-            # 思考参数
-            if "thinking_level" in model_config:
-                result["thinking_level"] = model_config["thinking_level"]
-            if "thinking_budget" in model_config:
-                result["thinking_budget"] = model_config["thinking_budget"]
             return result
 
     return {"error": "无已启用的 provider"}
@@ -130,16 +145,18 @@ async def update_main_model(req: UpdateMainModelRequest):
 
     for p in providers:
         if p.get("id") == req.provider_id:
-            mc = p.setdefault("model_config", {})
-            mc["model"] = req.model
+            # 写真实生效路径：顶层 model（openai_source 唯一读取点）
+            p["model"] = req.model
+            # max_tokens/temperature 唯一生效路径 = provider custom_extra_body
+            cb = p.setdefault("custom_extra_body", {})
             if req.max_tokens is not None:
-                mc["max_tokens"] = req.max_tokens
+                cb["max_tokens"] = req.max_tokens
             if req.temperature is not None:
-                mc["temperature"] = req.temperature
-            if req.thinking_level is not None:
-                mc["thinking_level"] = req.thinking_level
-            if req.thinking_budget is not None:
-                mc["thinking_budget"] = req.thinking_budget
+                cb["temperature"] = req.temperature
+            # thinking S2 跳过：openai 兼容层不认识裸 thinking_level/budget 键
+            # （需嵌套 google.thinking_config 或 reasoning_effort，待端点实测，暂不落盘）
+            # 清理 model_config 死字段（框架不读，避免认知陷阱）
+            p.pop("model_config", None)
             _save_cmd_config(config)
             return {"success": True}
 
@@ -156,7 +173,8 @@ async def get_flashlite_config():
     config = _load_flashlite_config()
     result = {
         "model": config.get("model", "gemini-3.1-flash-lite-preview"),
-        "sync_interval": config.get("sync_interval", 5),
+        # 键名对齐 schema/main.py:116 顶层键 sync_trigger_interval（前端字段名保持 sync_interval 不变）
+        "sync_interval": config.get("sync_trigger_interval", 5),
         "checkpoint_limit": config.get("checkpoint_limit", config.get("checkpoint_token_limit", 50000)),
         "checkpoint_keep_recent": config.get("checkpoint_keep_recent", 10),
         "checkpoint_compress_front_ratio": config.get("checkpoint_compress_front_ratio", 0.7),
@@ -213,7 +231,8 @@ async def update_flashlite_config(req: UpdateFlashLiteRequest):
     if req.model:
         config["model"] = req.model
     if req.sync_interval is not None:
-        config["sync_interval"] = req.sync_interval
+        # 写顶层键 sync_trigger_interval（与 schema/main.py:116 一致；旧键 sync_interval 已断链）
+        config["sync_trigger_interval"] = req.sync_interval
     if req.checkpoint_limit is not None:
         config["checkpoint_limit"] = max(1000, min(500000, req.checkpoint_limit))
     if req.checkpoint_keep_recent is not None:
@@ -289,7 +308,8 @@ async def update_flashlite_config(req: UpdateFlashLiteRequest):
 @router.get("/storage-policy")
 async def get_storage_policy():
     """获取消息持久化分级策略"""
-    config = _load_flashlite_config()
+    # storage_policy 走 B 文件特例：persistence 插件直接读 B 文件，绕过 schema
+    config = _load_flashlite_b_config()
     policy = config.get("storage_policy", {})
     return {
         "hot_days": policy.get("hot_days", 7),
@@ -309,7 +329,8 @@ class UpdateStoragePolicyRequest(BaseModel):
 @router.post("/storage-policy")
 async def update_storage_policy(req: UpdateStoragePolicyRequest):
     """更新消息持久化分级策略"""
-    config = _load_flashlite_config()
+    # storage_policy 走 B 文件特例：persistence/main.py:_load_storage_policy 直接读 B 文件
+    config = _load_flashlite_b_config()
     policy = config.setdefault("storage_policy", {})
 
     if req.hot_days is not None:
@@ -330,7 +351,7 @@ async def update_storage_policy(req: UpdateStoragePolicyRequest):
     if archive <= policy.get("cold_days", 30):
         policy["archive_days"] = policy.get("cold_days", 30) + 30
 
-    _save_flashlite_config(config)
+    _save_flashlite_b_config(config)
     return {"success": True, "policy": policy}
 
 

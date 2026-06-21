@@ -76,11 +76,14 @@
 - 验收：存储费记得上;FlashLite model 面板可切;子代理工具可用;新消息 T 文件 meta 有真 QQ 号;不再产生 (未知)/串号脏卡
 - smoke：发几条群消息看 T 文件 meta.sender_qq 有值
 
-### S2 — 配置断链修复
+### S2 — 配置断链修复（详见 `S2_实现方案.md`）
 - 目标：面板改的能真生效（零号任务）
-- 执行：[ ]扩 `_conf_schema.json` 声明所有键(含Plan_5新参数,见参数表) [ ]面板 models.py 写入路径→`data/config/...config.json` [ ]main.py 对动态键补 `json.loads`(dynamic_sampling/group_overrides) [ ]主模型同步写顶层 model [ ]热加载 /reload 端点(文案/阈值热,模型/key冷) [ ]修 storage_policy 等双源混用
-- 验收：面板改 checkpoint/采样/群覆盖 → 重启后 diff 运行时文件确认值生效且无键被框架删
-- smoke：面板改一个参数→读运行时文件确认写入→重启确认未被删
+- 范围切分：S2 只做「现存断链键(model/tool_model/image_model/checkpoint_*/cost_tracker) + 基础设施(`_cfg_json`/`SANDBOX_ROOT`/BOM/reload)」；**Plan_5 新机制参数随 S3-S7 各自实现时声明**(不在 S2 堆死键，声明跟随消费方)
+- 执行：[ ]主模型面板写顶层 model+custom_extra_body+回显读顶层+cmd_config 对齐 `gemini-3-flash-preview`(主人定) [ ]扩 schema 批1(现存断链键，cost_tracker 拆 cost_usd_to_cny+cost_custom_pricing) [ ]面板 `FLASHLITE_CONFIG` 指向 A 文件 + 编码 utf-8-sig(BOM 对齐) [ ]封装 `_cfg_json` 助手修 dynamic_sampling(L149)/group_overrides(L668/812) 静默失效 [ ]`SANDBOX_ROOT` 常量统一6处+cost_logs 迁移搬历史 json [ ]record() model 硬编码 L1722→self._model [ ]`/reload` 端点(触发通道待验证 AstrBot 机制)
+- storage_policy：保留走 B 文件特例，不动 persistence
+- 验收：面板改 checkpoint/采样/群覆盖/主模型 → 重启后 diff A 文件值生效且无键被框架删(log 无「将从当前配置中删除」)
+- smoke：面板改一参数→读 A 文件确认写入→重启确认未被删 + `_cfg` 读到新值
+- 进度(2026-06)：组1-5 **代码完成 + adversarial 复查 pass + py_compile 全过**；cmd_config 顶层 model 已切 `gemini-3-flash-preview`；cost_logs 已迁 `SANDBOX_ROOT/cost_logs`。**待**：运行验证(重启+面板往返)、组6 reload(调研 AstrBot 机制)、sp 脏数据(gemini_proxy)清理
 
 ### S3 — 锚点先行（C1 + C2）⚠️动手前定向找茬
 - 目标：record/BPC 的硬地基——每条消息有真轮号、崩溃可恢复
@@ -122,3 +125,8 @@
 - [ ] person_id 人工合并入口（命令 or 面板按钮）+ 存储位置，S4 时定
 - [ ] 现存脏卡(ξ(2680872177)等)迁移清洗脚本
 - [ ] 当前图实测 ✅ 已确认（多模态=补历史图能力）
+- [ ] **S3-S7 各 Stage 执行隐含追加**（S2 范围切分的承接）：声明本 Stage 新参数进 `_conf_schema.json`（动态子键 string(JSON) 打包、固定结构 object 展开）+ 面板控件 + string 键走 `_cfg_json` 助手；归类见「参数全覆盖表」。否则面板可调但重启被框架 check_config_integrity 删键
+- [ ] reload 触发通道：S2 实现时验证 AstrBot 插件配置 reload 机制，若机制重则 S2 先实现「重读配置方法」，完整热加载体验后续完善
+- [ ] **send_image/send_file fallback else 路径瑕疵**（main.py 约 L4589/4627）：剥离前缀得 clean_path/clean_file 但 join 仍用原始 image_path/file_path——S1 前既有 bug，非 S2 范围，待修
+- [ ] A 文件缺 model/tool_model 等新键 + B 文件残留旧 sync_interval：历史双写，S2 运行验证(重启框架 check_config_integrity 按新 schema 注入 A 文件)时确认消解
+- [ ] sp 脏数据 `provider_perf_chat_completion='gemini_proxy'`（data_v4.db preferences）：指向不存在的 provider，每次会话打 warning，回落 gemini_pro 仍能用；运行验证前顺手清理消噪

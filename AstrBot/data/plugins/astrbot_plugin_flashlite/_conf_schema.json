@@ -70,5 +70,100 @@
         "hint": "建议 12-48，设为 0 关闭定期 Review",
         "default": 24,
         "minimum": 0
+    },
+    "model": {
+        "description": "FlashLite 主判断模型名",
+        "type": "string",
+        "hint": "面板可切换；缺省回退模块常量。读取于 main.py:127 self._model",
+        "default": "gemini-3.1-flash-lite-preview"
+    },
+    "tool_model": {
+        "description": "工具模型配置（用于 search(scope=web) 等工具场景）",
+        "type": "object",
+        "hint": "model=模型名, thinking_budget=思考预算, api_keys=Key 池(Round-robin 轮转)。读取于 main.py:132-137",
+        "items": {
+            "model": {
+                "description": "工具模型名",
+                "type": "string",
+                "hint": "留空则回退 TOOL_MODEL_DEFAULT",
+                "default": ""
+            },
+            "thinking_budget": {
+                "description": "工具模型思考预算（token）",
+                "type": "int",
+                "hint": "默认 2048",
+                "default": 2048
+            },
+            "api_keys": {
+                "description": "工具模型 API Key 池",
+                "type": "list",
+                "items": {"type": "string"},
+                "hint": "Round-robin 轮转 + 429 自动切换，留空则复用主 key"
+            }
+        }
+    },
+    "image_model": {
+        "description": "图像生成模型配置",
+        "type": "object",
+        "hint": "model=图像模型名。读取于 main.py:4661-4662",
+        "items": {
+            "model": {
+                "description": "图像生成模型名",
+                "type": "string",
+                "hint": "默认 gemini-2.5-flash-image",
+                "default": "gemini-2.5-flash-image"
+            }
+        }
+    },
+    "checkpoint_limit": {
+        "description": "CHECKPOINT token 上限",
+        "type": "int",
+        "hint": "超过该 token 数触发压缩。读取于 main.py:197/2979",
+        "default": 50000,
+        "minimum": 1000
+    },
+    "checkpoint_keep_recent": {
+        "description": "CHECKPOINT 保留最近条数",
+        "type": "int",
+        "hint": "压缩时保留最近 N 条原文。读取于 main.py:198/2980",
+        "default": 10,
+        "minimum": 1
+    },
+    "checkpoint_compress_front_ratio": {
+        "description": "CHECKPOINT 前段压缩比例",
+        "type": "float",
+        "hint": "压缩时前段所占比例（0-1）。读取于 main.py:2981",
+        "default": 0.7
+    },
+    "checkpoint_cooldown_seconds": {
+        "description": "CHECKPOINT 压缩冷却时间（秒）",
+        "type": "int",
+        "hint": "两次压缩最小间隔。读取于 main.py:2982",
+        "default": 300,
+        "minimum": 0
+    },
+    "checkpoint_target_min": {
+        "description": "CHECKPOINT 压缩目标下限比例",
+        "type": "float",
+        "hint": "压缩后目标 token 占上限的最小比例（0-1）。读取于 main.py:2983",
+        "default": 0.20
+    },
+    "checkpoint_target_max": {
+        "description": "CHECKPOINT 压缩目标上限比例",
+        "type": "float",
+        "hint": "压缩后目标 token 占上限的最大比例（0-1）。读取于 main.py:2984",
+        "default": 0.40
+    },
+    "cost_usd_to_cny": {
+        "description": "美元转人民币汇率",
+        "type": "float",
+        "hint": "成本统计用。读取于 main.py CostTracker(usd_to_cny=...)",
+        "default": 7.2
+    },
+    "cost_custom_pricing": {
+        "description": "自定义模型定价表（JSON 格式）",
+        "type": "string",
+        "hint": "动态模型名子键，必须 JSON 字符串打包（不可 object 展开，否则被框架递归删）。格式: {\"模型名\":{\"input\":0.1,\"output\":0.4}}。运行时 json.loads 解析",
+        "default": "{}"
     }
 }

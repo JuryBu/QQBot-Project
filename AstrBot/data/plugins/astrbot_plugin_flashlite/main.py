@@ -56,9 +56,9 @@ except ImportError:
 
 # ToolRegistry 动态工具注册表
 try:
-    from .tool_registry import ToolRegistry
+    from .tool_registry import ToolRegistry, SANDBOX_ROOT
 except ImportError:
-    from tool_registry import ToolRegistry
+    from tool_registry import ToolRegistry, SANDBOX_ROOT
 
 # Web Fetch 引擎
 try:
@@ -146,7 +146,7 @@ class FlashLiteEngine(Star):
         self._sampling_mode = self._cfg("sampling_mode", "dynamic")  # dynamic / fixed
         
         # 智能动态采样配置（4 级活跃度阈值 + 对应间隔）
-        _dyn_cfg = self._cfg("dynamic_sampling", {})
+        _dyn_cfg = self._cfg_json("dynamic_sampling", {})
         self._dyn_window_minutes = _dyn_cfg.get("window_minutes", 10) if isinstance(_dyn_cfg, dict) else 10
         # 防御性校验：确保 window_minutes 为正整数
         try:
@@ -248,12 +248,13 @@ class FlashLiteEngine(Star):
 
         # CostTracker 成本追踪
         try:
-            _cost_dir = os.path.join(_PLUGIN_DIR, "Sandbox", "cost_logs")
-            _cost_cfg = self._cfg("cost_tracker", {})
+            _cost_dir = os.path.join(SANDBOX_ROOT, "cost_logs")
+            _cost_usd_to_cny = self._cfg("cost_usd_to_cny", 7.2)
+            _cost_custom_pricing = self._cfg_json("cost_custom_pricing", {})
             self._cost_tracker = CostTracker(
                 data_dir=_cost_dir,
-                usd_to_cny=_cost_cfg.get("usd_to_cny", 7.2) if isinstance(_cost_cfg, dict) else 7.2,
-                custom_pricing=_cost_cfg.get("custom_pricing") if isinstance(_cost_cfg, dict) else None,
+                usd_to_cny=_cost_usd_to_cny if isinstance(_cost_usd_to_cny, (int, float)) else 7.2,
+                custom_pricing=_cost_custom_pricing if isinstance(_cost_custom_pricing, dict) else None,
             )
             logger.info(f"CostTracker 初始化完成 (data_dir={_cost_dir})")
         except Exception as e:
@@ -282,6 +283,27 @@ class FlashLiteEngine(Star):
         if hasattr(self._raw_config, "get"):
             return self._raw_config.get(key, default)
         return getattr(self._raw_config, key, default)
+
+    def _cfg_json(self, key: str, default=None):
+        """读取可能为 JSON 字符串的配置键（schema type:string + 运行时 json.loads）。
+        若取到的值是 str 则尝试 json.loads；解析失败时，若 default 本身是 JSON 字符串
+        则回退解析 default，否则原样返回 default。非 str 值直接原样返回。"""
+        v = self._cfg(key, default)
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:
+                if isinstance(default, str):
+                    try:
+                        return json.loads(default)
+                    except Exception:
+                        return default
+                return default
+        return v
+
+    def _get_group_overrides(self):
+        """统一读取 group_overrides（动态键，可能为 JSON 字符串）。"""
+        return self._cfg_json("group_overrides", {})
 
     def _resolve_quoted(self, value: str) -> str:
         """解析 @quoted 快捷语法，将 @quoted_file / @quoted_msg 等替换为实际值"""
@@ -665,7 +687,7 @@ class FlashLiteEngine(Star):
             # ===== 群聊 FlashLite 禁用拦截（在所有触发路径之前）=====
             # 当群级配置 enabled=false 时，完全跳过 FlashLite 所有处理
             # （包括 @/关键词异步触发、消息计数同步触发、时间兜底触发）
-            _group_overrides = self._cfg("group_overrides", {})
+            _group_overrides = self._get_group_overrides()
             if isinstance(_group_overrides, dict):
                 _grp_override = _group_overrides.get(group_id, {})
                 if isinstance(_grp_override, dict) and not _grp_override.get("enabled", True):
@@ -809,7 +831,7 @@ class FlashLiteEngine(Star):
     def _get_effective_interval(self, group_id: str) -> int:
         """获取当前群的有效采样间隔（群覆盖 > 动态 > 全局固定）"""
         # Stage 9: 群独立配置覆盖（预留接口）
-        group_overrides = self._cfg("group_overrides", {})
+        group_overrides = self._get_group_overrides()
         if isinstance(group_overrides, dict) and group_id in group_overrides:
             override = group_overrides[group_id]
             if isinstance(override, dict):
@@ -1719,7 +1741,7 @@ class FlashLiteEngine(Star):
         if self._cost_tracker and _usage:
             try:
                 await self._cost_tracker.record(
-                    model=FLASH_LITE_MODEL,
+                    model=self._model,
                     call_type="flashlite",
                     window_key=window_key,
                     prompt_tokens=_usage.get("promptTokenCount", 0),
@@ -1835,14 +1857,8 @@ class FlashLiteEngine(Star):
 
         # 4.1: 动态加载 base_tools 工具定义到子代理
         try:
-            # 指向项目根真目录 Sandbox/base_tools（与 tool_registry.SANDBOX_ROOT 一致：
-            # 插件目录上溯 4 层到项目根，再拼 Sandbox/base_tools）
-            base_tools_dir = os.path.normpath(
-                os.path.join(
-                    os.path.dirname(__file__),
-                    "..", "..", "..", "..", "Sandbox", "base_tools",
-                )
-            )
+            # 指向项目根真目录 Sandbox/base_tools（统一走 tool_registry.SANDBOX_ROOT）
+            base_tools_dir = os.path.join(SANDBOX_ROOT, "base_tools")
             excluded_tools = {"task_set", "knowledge_update", "browser_agent", "run_custom_tool"}  # H-3: 防递归委托
             if os.path.isdir(base_tools_dir):
                 import json as _json
@@ -2067,7 +2083,7 @@ class FlashLiteEngine(Star):
         """读取 base_tools/*.tool.json 中的 timeout_ms，返回秒数，默认 30s"""
         try:
             tool_file = os.path.join(
-                os.path.dirname(__file__), "Sandbox", "base_tools", f"{tool_name}.tool.json"
+                SANDBOX_ROOT, "base_tools", f"{tool_name}.tool.json"
             )
             with open(tool_file, encoding="utf-8") as f:
                 return json.loads(f.read()).get("timeout_ms", 30000) / 1000
@@ -3271,20 +3287,34 @@ class FlashLiteEngine(Star):
             # 9. Sandbox 环境说明
             try:
                 sandbox_env_path = os.path.join(
-                    os.path.dirname(__file__), "Sandbox", "config", "env.json"
+                    SANDBOX_ROOT, "config", "env.json"
                 )
                 if os.path.exists(sandbox_env_path):
                     import json as _json
                     with open(sandbox_env_path, 'r', encoding='utf-8') as _f:
                         env_info = _json.load(_f)
+                    # 真文件字段：sandbox_version/total_storage_mb/ram_limit_mb/
+                    #   exec_timeout_default_ms/exec_timeout_max_ms/available_languages/tool_count/custom_tool_count
+                    _langs = env_info.get('available_languages', [])
+                    _lang_str = " ".join(_langs) if isinstance(_langs, list) else str(_langs)
+                    _to_default_ms = env_info.get('exec_timeout_default_ms', 30000)
+                    _to_max_ms = env_info.get('exec_timeout_max_ms', 300000)
+                    try:
+                        _to_default_s = int(_to_default_ms) // 1000
+                    except (TypeError, ValueError):
+                        _to_default_s = 30
+                    try:
+                        _to_max_s = int(_to_max_ms) // 1000
+                    except (TypeError, ValueError):
+                        _to_max_s = 300
                     dynamic_parts.append(
-                        f"## Sandbox 环境\n{env_info.get('description', '')}\n"
-                        f"操作系统: {env_info.get('os', 'Unknown')}\n"
-                        f"Python: {env_info.get('python_version', 'N/A')}\n"
-                        f"网络: {'可用' if env_info.get('network') else '不可用'}\n"
-                        f"执行超时: sandbox_exec 默认 30s 上限 300s(可通过 timeout_ms 参数指定)\n"
-                        f"内存: 无硬限 建议单次脚本 <500MB\n"
-                        f"磁盘: workspace/ 下可自由读写\n"
+                        f"## Sandbox 环境\n"
+                        f"沙盒版本: {env_info.get('sandbox_version', 'N/A')}\n"
+                        f"可用语言: {_lang_str}\n"
+                        f"执行超时: sandbox_exec 默认 {_to_default_s}s 上限 {_to_max_s}s(可通过 timeout_ms 参数指定)\n"
+                        f"内存: 单次执行上限 {env_info.get('ram_limit_mb', 256)}MB\n"
+                        f"存储: workspace/ 可自由读写 总容量 {env_info.get('total_storage_mb', 512)}MB\n"
+                        f"工具数: {env_info.get('tool_count', 0)}(自定义 {env_info.get('custom_tool_count', 0)})\n"
                         f"核心已装包: aiohttp PIL pdfplumber openpyxl pandas matplotlib numpy requests bs4\n"
                         f"需要其他包: sandbox_exec 执行 pip install 自行安装即可"
                     )  # 动态
@@ -4586,7 +4616,7 @@ class FlashLiteEngine(Star):
             if self._sandbox:
                 real_path = self._sandbox._security.resolve_path(clean_path)
             else:
-                sandbox_base = os.path.join(os.path.dirname(__file__), "Sandbox")
+                sandbox_base = SANDBOX_ROOT
                 real_path = os.path.normpath(os.path.join(sandbox_base, image_path))
                 if not real_path.startswith(os.path.normpath(sandbox_base)):
                     return "❌ 安全错误：路径超出 Sandbox 范围"
@@ -4624,7 +4654,7 @@ class FlashLiteEngine(Star):
             if self._sandbox:
                 real_path = self._sandbox._security.resolve_path(clean_file)
             else:
-                sandbox_base = os.path.join(os.path.dirname(__file__), "Sandbox")
+                sandbox_base = SANDBOX_ROOT
                 real_path = os.path.normpath(os.path.join(sandbox_base, file_path))
                 if not real_path.startswith(os.path.normpath(sandbox_base)):
                     return "❌ 安全错误：路径超出 Sandbox 范围"
@@ -5644,7 +5674,7 @@ class FlashLiteEngine(Star):
             name(string): 工具名（如 search, web_fetch, memory_write）留空列出全部
         """
         import json as _json
-        base_tools_dir = os.path.join(self._sandbox._root, "base_tools") if self._sandbox else os.path.join(os.path.dirname(__file__), "Sandbox", "base_tools")
+        base_tools_dir = os.path.join(self._sandbox._root, "base_tools") if self._sandbox else os.path.join(SANDBOX_ROOT, "base_tools")
         if not os.path.isdir(base_tools_dir):
             return "错误: base_tools 目录不存在"
 
