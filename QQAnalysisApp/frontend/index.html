@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QQ 智能分析助手</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="script.js" defer></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Left Sidebar: Settings -->
+        <aside class="sidebar glass">
+            <h2>设置与控制</h2>
+
+            <div class="section">
+                <h3>NapCat 状态</h3>
+                <div id="napcat-status" class="status-indicator offline">未启动</div>
+
+                <!-- Login Method Selection -->
+                <div class="login-methods">
+                    <label>登录方式</label>
+                    <div class="login-tabs">
+                        <button class="login-tab active" data-method="qrcode"
+                            onclick="selectLoginMethod('qrcode')">扫码登录</button>
+                        <button class="login-tab" data-method="quick" onclick="selectLoginMethod('quick')">快速登录</button>
+                    </div>
+
+                    <!-- QR Code Login Panel (default) -->
+                    <div id="qrcode-login-panel" class="login-panel active">
+                        <p style="font-size:0.85em;color:#666;">📱 点击启动后用手机 QQ 扫码</p>
+                    </div>
+
+                    <!-- Quick Login Panel -->
+                    <div id="quick-login-panel" class="login-panel">
+                        <select id="quick-login-qq">
+                            <option value="" disabled selected>选择已保存的QQ</option>
+                        </select>
+                        <button onclick="loadSavedAccounts()" class="small-btn" style="margin-top:5px;width:auto;">🔄
+                            刷新</button>
+                        <p style="font-size:0.75em;color:#999;margin-top:5px;">⚠️ 需要 QQ 客户端有登录缓存</p>
+                    </div>
+                </div>
+
+                <button id="toggle-napcat-btn" onclick="toggleNapCat()">启动 NapCat</button>
+            </div>
+
+            <div class="section">
+                <h3>大模型配置</h3>
+                <label>API Base URL</label>
+                <input type="text" id="llm-base" placeholder="https://api.openai.com/v1"
+                    value="https://api.openai.com/v1">
+                <label>API Key</label>
+                <input type="password" id="llm-key" placeholder="sk-...">
+                <button onclick="fetchModels()">获取模型列表</button>
+                <select id="llm-model">
+                    <option value="" disabled selected>选择模型</option>
+                </select>
+                <button onclick="saveLLMConfig()">保存配置</button>
+            </div>
+
+            <div class="section">
+                <h3>目标设置 <button class="icon-btn" onclick="openSettings()" title="分析设置">⚙️</button></h3>
+                <label>目标 QQ 账号</label>
+                <input type="text" id="target-qq" placeholder="输入账号">
+                <label>群号 (可选)</label>
+                <input type="text" id="group-id" placeholder="输入群号">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="is-group">
+                    <label for="is-group">群聊模式</label>
+                    <span class="tooltip" title="勾选后，将分析目标用户在该群内的聊天记录上下文，而非私聊">❓</span>
+                </div>
+
+                <label>已知信息</label>
+                <textarea id="known-info" placeholder="输入你知道的关于该用户的真实信息（供大模型参考）" rows="3"></textarea>
+
+                <button class="primary-btn" onclick="updateDashboard()">更新分析</button>
+            </div>
+
+            <div id="console-output" class="console">
+                <!-- Logs will appear here -->
+            </div>
+        </aside>
+
+        <!-- Center: Chat Window -->
+        <main class="chat-window-container glass">
+            <div class="chat-sidebar">
+                <!-- Search -->
+                <div class="chat-search">
+                    <input type="text" id="contact-search" placeholder="搜索" oninput="searchContacts(this.value)">
+                </div>
+                <!-- Contact List (populated by JS after login) -->
+                <div id="chat-list-container">
+                    <!-- Will be populated by fetchContacts() -->
+                </div>
+            </div>
+
+            <div class="chat-main-area">
+                <header class="chat-header">
+                    <div class="chat-title-info">
+                        <h2 id="chat-title">请选择会话</h2>
+                        <span class="status-text" id="chat-status-text"></span>
+                    </div>
+                    <div class="chat-actions">
+                        <span class="icon" onclick="alert('QQ语音通话功能暂不可用')">📞</span>
+                        <span class="icon" onclick="window.print()">📹</span>
+                        <span class="icon" onclick="alert('远程协助功能暂不可用')">💻</span>
+                        <span class="icon" onclick="openChatSettings()">⚙️</span>
+                    </div>
+                </header>
+
+                <div id="chat-messages" class="messages-scroll-area">
+                    <!-- Messages will be injected here after selecting a contact -->
+                </div>
+
+                <div class="chat-input-area">
+                    <div class="chat-toolbar">
+                        <span class="icon" title="表情" onclick="toggleEmojiPicker()">🙂</span>
+                        <span class="icon" title="截图">✂️</span>
+                        <span class="icon" title="文件"
+                            onclick="document.getElementById('file-upload-input').click()">📁</span>
+                        <span class="icon" title="图片"
+                            onclick="document.getElementById('image-upload-input').click()">🖼️</span>
+                        <span class="icon" title="语音">🎤</span>
+                        <input type="file" id="image-upload-input" accept="image/*" style="display:none"
+                            onchange="handleImageUpload(event)">
+                        <input type="file" id="file-upload-input" style="display:none"
+                            onchange="handleImageUpload(event)">
+                        <!-- Emoji Picker (hidden by default) -->
+                        <div id="emoji-picker" class="emoji-picker" style="display:none">
+                            <span onclick="insertEmoji('😀')">😀</span>
+                            <span onclick="insertEmoji('😂')">😂</span>
+                            <span onclick="insertEmoji('😍')">😍</span>
+                            <span onclick="insertEmoji('🤔')">🤔</span>
+                            <span onclick="insertEmoji('👍')">👍</span>
+                            <span onclick="insertEmoji('❤️')">❤️</span>
+                            <span onclick="insertEmoji('😭')">😭</span>
+                            <span onclick="insertEmoji('🎉')">🎉</span>
+                            <span onclick="insertEmoji('😊')">😊</span>
+                            <span onclick="insertEmoji('🙏')">🙏</span>
+                        </div>
+                    </div>
+                    <textarea id="chat-input" class="chat-textarea" placeholder="输入消息..."></textarea>
+                    <div class="chat-send-row">
+                        <button class="send-btn" onclick="sendMessage()">发送</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Modals -->
+        <div id="qr-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeModal('qr-modal')">&times;</span>
+                <h3>请使用手机 QQ 扫码登录</h3>
+                <div id="qr-container">
+                    <img id="qr-image" src="" alt="QR Code" />
+                </div>
+                <p>扫码后请等待状态更新。</p>
+            </div>
+        </div>
+
+        <div id="settings-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeModal('settings-modal')">&times;</span>
+                <h3>分析系统设置</h3>
+                <label>爬取历史天数</label>
+                <input type="number" id="setting-days" value="7">
+                <label>上下文消息数量 (条)</label>
+                <input type="number" id="setting-msg-count" value="50">
+                <label>爬取说说数量 (条)</label>
+                <input type="number" id="setting-qzone-count" value="10">
+                <button onclick="saveSettings()">保存</button>
+            </div>
+        </div>
+
+        <div id="chat-settings-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeModal('chat-settings-modal')">&times;</span>
+                <h3>聊天窗口设置</h3>
+                <label>自动加载历史消息条数</label>
+                <input type="number" id="chat-history-count" value="50">
+                <button onclick="saveChatSettings()">保存</button>
+            </div>
+        </div>
+
+        <!-- Context Menu for Messages -->
+        <div id="message-context-menu" class="context-menu" style="display:none;">
+            <div class="menu-item" onclick="copyMessage()">📋 复制</div>
+            <div class="menu-item" onclick="forwardMessage()">↗️ 转发</div>
+            <div class="menu-item" onclick="favoriteMessage()">⭐ 收藏</div>
+            <div class="menu-item" onclick="multiSelectMessage()">☑️ 多选</div>
+            <div class="menu-item" onclick="replyMessage()">💬 引用</div>
+            <div class="menu-item" id="recall-menu-item" onclick="recallMessage()">↩️ 撤回</div>
+            <div class="menu-item" onclick="deleteMessage()">🗑️ 删除</div>
+        </div>
+
+        <!-- Profile Card Modal -->
+        <div id="profile-card-modal" class="modal">
+            <div class="modal-content profile-card">
+                <span class="close" onclick="closeModal('profile-card-modal')">&times;</span>
+                <div class="pc-header">
+                    <img id="pc-avatar" class="pc-avatar">
+                    <div class="pc-basic">
+                        <div id="pc-name" class="pc-name"></div>
+                        <div id="pc-qq" class="pc-qq"></div>
+                        <div id="pc-signature" class="pc-signature"></div>
+                    </div>
+                </div>
+                <div class="pc-details">
+                    <div class="pc-row"><span class="pc-label">性别</span><span id="pc-sex">-</span></div>
+                    <div class="pc-row"><span class="pc-label">年龄</span><span id="pc-age">-</span></div>
+                    <div class="pc-row"><span class="pc-label">等级</span><span id="pc-level">-</span></div>
+                </div>
+                <div class="pc-actions">
+                    <button onclick="sendMessageTo()">发消息</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Image Viewer Modal -->
+        <div id="image-viewer-modal" class="modal" onclick="closeImageViewerOnBackdrop(event)">
+            <div class="image-viewer-container">
+                <img id="image-viewer-img" class="image-viewer-img">
+                <button class="image-viewer-close" onclick="closeModal('image-viewer-modal')">❌ 关闭</button>
+            </div>
+        </div>
+
+        <!-- Right: Analysis Panel -->
+        <aside class="analysis-panel glass">
+            <h2>分析报告</h2>
+
+            <div class="analysis-scroll-area">
+                <div class="card person-card">
+                    <div class="avatar-large" id="profile-avatar"></div>
+                    <h3 id="profile-name">未知名</h3>
+                    <p id="profile-bio">暂无简介</p>
+                    <div class="tags" id="profile-tags">
+                        <!-- Dynamic Tags -->
+                    </div>
+                    <div class="profile-actions">
+                        <button class="small-btn" onclick="openUserDataModal()">📊 查看数据</button>
+                        <button class="small-btn" onclick="exportCurrentUserData()">📥 导出</button>
+                    </div>
+                </div>
+
+                <div class="card analysis-card">
+                    <h3>性格画像</h3>
+                    <p id="analysis-personality">等待分析...</p>
+                    <h3>兴趣爱好</h3>
+                    <p id="analysis-interests">等待分析...</p>
+                    <h3>近期情绪</h3>
+                    <p id="analysis-emotion">等待分析...</p>
+                </div>
+
+                <div class="card topics-card">
+                    <h3>推荐话题</h3>
+                    <div id="suggested-topics" class="topic-cards-container">
+                        <div class="topic-card-placeholder">点击"更新分析"获取推荐话题</div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- User Data Management Modal -->
+        <div id="user-data-modal" class="modal">
+            <div class="modal-content modal-large">
+                <span class="close" onclick="closeModal('user-data-modal')">&times;</span>
+                <h3>📊 用户数据管理</h3>
+
+                <div class="user-data-tabs">
+                    <button class="tab-btn active" onclick="switchDataTab('profile-tab')">基本资料</button>
+                    <button class="tab-btn" onclick="switchDataTab('history-tab')">聊天记录</button>
+                    <button class="tab-btn" onclick="switchDataTab('analysis-tab')">分析结果</button>
+                    <button class="tab-btn" onclick="switchDataTab('notes-tab')">备注信息</button>
+                </div>
+
+                <div class="user-data-content">
+                    <div id="profile-tab" class="data-tab active">
+                        <div class="data-section">
+                            <h4>用户资料</h4>
+                            <div id="user-profile-display">
+                                <p>暂无数据，请先运行"更新分析"</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="history-tab" class="data-tab">
+                        <div class="data-section">
+                            <h4>最近聊天记录</h4>
+                            <div id="user-history-display" class="history-list">
+                                <p>暂无数据</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="analysis-tab" class="data-tab">
+                        <div class="data-section">
+                            <h4>AI 分析结果</h4>
+                            <div id="user-analysis-display">
+                                <p>暂无分析结果</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="notes-tab" class="data-tab">
+                        <div class="data-section">
+                            <h4>手动添加备注</h4>
+                            <textarea id="user-note-input" placeholder="输入关于此用户的备注信息..." rows="5"></textarea>
+                            <div class="note-actions">
+                                <button onclick="saveUserNote()">💾 保存备注</button>
+                                <input type="file" id="note-file-input" accept="image/*" style="display:none"
+                                    onchange="handleNoteFileUpload(event)">
+                                <button onclick="document.getElementById('note-file-input').click()">📷 添加图片</button>
+                            </div>
+                            <div id="note-images-preview" class="note-images"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button class="primary-btn" onclick="exportCurrentUserData()">📥 导出全部数据</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Topic Detail Modal -->
+        <div id="topic-detail-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeModal('topic-detail-modal')">&times;</span>
+                <h3 id="topic-detail-title">话题详情</h3>
+                <div id="topic-detail-content" class="topic-detail-body">
+                    <!-- Topic details will be loaded here -->
+                </div>
+                <div class="topic-actions">
+                    <button onclick="copyTopicToInput()">📋 复制到输入框</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>老板娘控制中心 | BossLady Console</title>
+    <meta name="description" content="Boss Lady AI Agent 统一管理控制台">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="avatar.webp">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="app">
+        <!-- 侧边栏 -->
+        <nav class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <img class="logo-icon" src="avatar.webp" alt="老板娘" style="width:36px;height:36px;border-radius:50%;object-fit:cover;">
+                    <span class="logo-text">老板娘<br><small>控制中心</small></span>
+                </div>
+            </div>
+            <div class="nav-items">
+                <a class="nav-item active" data-page="dashboard" href="#dashboard">
+                    <span class="nav-icon">📊</span><span class="nav-label">仪表盘</span>
+                </a>
+                <a class="nav-item" data-page="bot" href="#bot">
+                    <span class="nav-icon">🤖</span><span class="nav-label">Bot 管理</span>
+                </a>
+                <a class="nav-item" data-page="models" href="#models">
+                    <span class="nav-icon">🧠</span><span class="nav-label">模型配置</span>
+                </a>
+                <a class="nav-item" data-page="messages" href="#messages">
+                    <span class="nav-icon">💾</span><span class="nav-label">对话内存</span>
+                </a>
+                <a class="nav-item" data-page="memory" href="#memory">
+                    <span class="nav-icon">📝</span><span class="nav-label">Memory</span>
+                </a>
+                <a class="nav-item" data-page="knowledge" href="#knowledge">
+                    <span class="nav-icon">📖</span><span class="nav-label">Knowledge</span>
+                </a>
+                <a class="nav-item" data-page="cost" href="#cost">
+                    <span class="nav-icon">💰</span><span class="nav-label">成本监控</span>
+                </a>
+                <a class="nav-item" data-page="sandbox" href="#sandbox">
+                    <span class="nav-icon">📦</span><span class="nav-label">Sandbox</span>
+                </a>
+                <a class="nav-item" data-page="settings" href="#settings">
+                    <span class="nav-icon">⚙️</span><span class="nav-label">系统设置</span>
+                </a>
+            </div>
+            <div class="sidebar-footer">
+                <span class="version">v1.0.0</span>
+            </div>
+        </nav>
+
+        <!-- 主内容 -->
+        <main class="main-content" id="mainContent">
+            <!-- 仪表盘 -->
+            <section class="page" id="page-dashboard">
+                <div class="page-header">
+                    <h1>📊 仪表盘</h1>
+                    <span class="page-subtitle" id="currentTime"></span>
+                </div>
+
+                <!-- 状态卡片 -->
+                <div class="status-cards">
+                    <div class="status-card" id="cardBot">
+                        <div class="status-indicator offline" id="botIndicator"></div>
+                        <div class="status-info">
+                            <span class="status-label">QQ Bot</span>
+                            <span class="status-value" id="botStatus">检测中...</span>
+                        </div>
+                    </div>
+                    <div class="status-card" id="cardNapCat">
+                        <div class="status-indicator offline" id="napcatIndicator"></div>
+                        <div class="status-info">
+                            <span class="status-label">NapCat</span>
+                            <span class="status-value" id="napcatStatus">检测中...</span>
+                        </div>
+                    </div>
+                    <div class="status-card" id="cardAstrBot">
+                        <div class="status-indicator offline" id="astrbotIndicator"></div>
+                        <div class="status-info">
+                            <span class="status-label">AstrBot</span>
+                            <span class="status-value" id="astrbotStatus">检测中...</span>
+                        </div>
+                    </div>
+                    <div class="status-card" id="cardConsole">
+                        <div class="status-indicator online" id="consoleIndicator"></div>
+                        <div class="status-info">
+                            <span class="status-label">控制台</span>
+                            <span class="status-value">运行中</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- OneBot WS 连接状态提示 -->
+                <div id="onebotWsAlert" class="card" style="display:none; margin-bottom:20px; padding:12px 18px; border-left:4px solid var(--danger); background:rgba(255,59,48,0.08);">
+                    <span style="font-weight:600;">⚠️ OneBot WS 未连接</span> — <span id="onebotWsDetail" style="color:var(--text-secondary)">NapCat→AstrBot 消息链路断开，对话内存/Memory/Knowledge 无法工作</span>
+                </div>
+
+                <!-- 统计 -->
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card">
+                        <div class="stat-icon">💬</div>
+                        <div class="stat-value" id="statMessages">0</div>
+                        <div class="stat-label">总消息数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📅</div>
+                        <div class="stat-value" id="statToday">0</div>
+                        <div class="stat-label">今日消息</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📝</div>
+                        <div class="stat-value" id="statMemory">0</div>
+                        <div class="stat-label">记忆条数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📖</div>
+                        <div class="stat-value" id="statKnowledge">0</div>
+                        <div class="stat-label">Knowledge 窗口</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🔄</div>
+                        <div class="stat-value" id="statCheckpoint">0</div>
+                        <div class="stat-label">CHECKPOINT 次数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📦</div>
+                        <div class="stat-value" id="statSandbox">0 MB</div>
+                        <div class="stat-label">Sandbox 使用</div>
+                    </div>
+                </div>
+
+                <!-- 实时消息流 -->
+                <div class="card" style="margin-top:20px;">
+                    <h2 style="display:flex;align-items:center;gap:8px;">
+                        <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);animation:pulse 2s infinite;"></span>
+                        📡 实时消息流
+                        <span id="streamCount" style="font-size:12px;color:var(--text-secondary);font-weight:400;margin-left:auto;">加载中...</span>
+                    </h2>
+                    <div id="messageStream" style="max-height:420px;overflow-y:auto;padding-right:4px;">
+                        <p style="color:var(--text-secondary)">正在连接消息流...</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Bot管理 -->
+            <section class="page hidden" id="page-bot">
+                <div class="page-header">
+                    <h1>🤖 Bot 管理</h1>
+                </div>
+                <div class="card">
+                    <h2>NapCat 状态</h2>
+                    <div id="napcatDetail">加载中...</div>
+                </div>
+                <div class="card">
+                    <h2>NapCat WebUI</h2>
+                    <p>通过内嵌 NapCat WebUI 管理 QQ 登录：</p>
+                    <iframe id="napcatIframe" style="width:100%;height:500px;border:1px solid var(--border);border-radius:8px;display:none"></iframe>
+                    <button class="btn btn-primary" id="btnLoadNapcat" onclick="loadNapcatWebUI()">打开 NapCat 管理面板</button>
+                </div>
+                <div class="card">
+                    <h2>AstrBot 状态</h2>
+                    <div id="astrbotDetail">加载中...</div>
+                </div>
+            </section>
+
+            <!-- 模型配置 -->
+            <section class="page hidden" id="page-models">
+                <div class="page-header">
+                    <h1>🧠 模型配置</h1>
+                    <button class="btn btn-secondary" id="refreshModelsBtn" onclick="refreshAvailableModels()">🔄 刷新模型列表</button>
+                </div>
+                <div class="card">
+                    <h2>🔑 API Key</h2>
+                    <div id="apiKeyInfo">加载中...</div>
+                    <div style="margin-top:12px">
+                        <label style="color:var(--text-secondary);font-size:13px">设置/更新 API Key：</label>
+                        <div style="display:flex;gap:8px;margin-top:4px">
+                            <input type="password" id="apiKeyInput" class="input-field" placeholder="AIza..." style="flex:1">
+                            <button class="btn btn-primary" onclick="saveApiKey()">保存 Key</button>
+                        </div>
+                        <p id="apiKeySaveResult" style="margin-top:6px;font-size:13px"></p>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>🔴 主模型</h2>
+                    <div id="mainModelInfo">加载中...</div>
+                    <div style="margin-top:12px">
+                        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:end">
+                            <div style="flex:1;min-width:200px">
+                                <label style="color:var(--text-secondary);font-size:13px">模型选择</label>
+                                <select id="mainModelSelect" class="input-field" style="width:100%;margin-top:4px" onchange="updateModelParams('main')">
+                                    <option value="">-- 刷新模型列表后选择 --</option>
+                                </select>
+                            </div>
+                            <div id="mainModelParams" style="display:contents"></div>
+                        </div>
+                        <button class="btn btn-primary" style="margin-top:8px" onclick="saveMainModel()">💾 保存主模型</button>
+                        <span id="mainModelSaveResult" style="margin-left:12px;font-size:13px"></span>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>🟢 Flash Lite 模型</h2>
+                    <div id="flashliteInfo">加载中...</div>
+                    <div style="margin-top:12px">
+                        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:end">
+                            <div style="flex:1;min-width:200px">
+                                <label style="color:var(--text-secondary);font-size:13px">模型选择</label>
+                                <select id="flashliteModelSelect" class="input-field" style="width:100%;margin-top:4px" onchange="updateModelParams('flashlite')">
+                                    <option value="">-- 刷新模型列表后选择 --</option>
+                                </select>
+                            </div>
+                            <div id="flashliteModelParams" style="display:contents"></div>
+                        </div>
+                        <button class="btn btn-primary" style="margin-top:8px" onclick="saveFlashLite()">💾 保存 Flash Lite</button>
+                        <span id="flashliteSaveResult" style="margin-left:12px;font-size:13px"></span>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>🟡 工具模型</h2>
+                    <div id="toolModelInfo">加载中...</div>
+                    <div style="margin-top:12px">
+                        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:end">
+                            <div style="flex:1;min-width:200px">
+                                <label style="color:var(--text-secondary);font-size:13px">模型选择</label>
+                                <select id="toolModelSelect" class="input-field" style="width:100%;margin-top:4px" onchange="updateModelParams('tool')">
+                                    <option value="">-- 刷新模型列表后选择 --</option>
+                                </select>
+                            </div>
+                            <div id="toolModelParams" style="display:contents"></div>
+                        </div>
+                        <!-- API Key 池（交互式列表管理） -->
+                        <div style="margin-top:12px" id="toolKeyPoolSection">
+                            <div id="toolKeyPoolList" style="margin-bottom:8px"></div>
+                            <div id="toolKeyPoolInput" style="display:none;margin-bottom:8px">
+                                <input id="toolKeyNewInput" class="input-field" type="text"
+                                    placeholder="输入 API Key"
+                                    style="width:100%;font-family:monospace;font-size:12px;margin-bottom:6px" />
+                                <div style="display:flex;gap:8px;justify-content:flex-end">
+                                    <button class="btn" style="padding:4px 14px;font-size:12px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary)" onclick="cancelAddToolKey()">取消</button>
+                                    <button class="btn btn-primary" style="padding:4px 14px;font-size:12px" onclick="confirmAddToolKey()">确定</button>
+                                </div>
+                            </div>
+                            <button class="btn" id="toolKeyAddBtn"
+                                style="padding:4px 14px;font-size:12px;background:transparent;border:1px dashed var(--border-color);color:var(--text-secondary);cursor:pointer;width:100%;border-radius:6px"
+                                onclick="showAddToolKeyInput()">
+                                ＋ 增加并发用 API Key
+                            </button>
+                            <div id="toolApiKeysInfo" style="font-size:12px;color:var(--text-secondary);margin-top:6px"></div>
+                        </div>
+                        <button class="btn btn-primary" style="margin-top:8px" onclick="saveToolModel()">💾 保存工具模型</button>
+                        <span id="toolModelSaveResult" style="margin-left:12px;font-size:13px"></span>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>🎨 图像模型</h2>
+                    <div id="imageModelInfo">加载中...</div>
+                    <div style="margin-top:12px">
+                        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:end">
+                            <div style="flex:1;min-width:200px">
+                                <label style="color:var(--text-secondary);font-size:13px">模型选择（自动过滤图像生成模型）</label>
+                                <select id="imageModelSelect" class="input-field" style="width:100%;margin-top:4px" onchange="updateImageModelParams()">
+                                    <option value="">-- 刷新模型列表后选择 --</option>
+                                </select>
+                            </div>
+                            <div id="imageModelParams" style="display:flex;gap:16px;flex-wrap:wrap;align-items:end"></div>
+                        </div>
+                        <button class="btn btn-primary" style="margin-top:8px" onclick="saveImageModel()">💾 保存图像模型</button>
+                        <span id="imageModelSaveResult" style="margin-left:12px;font-size:13px"></span>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>📋 可用模型列表</h2>
+                    <div id="modelList" style="margin-top:12px"></div>
+                </div>
+            </section>
+
+            <!-- 对话内存 -->
+            <section class="page hidden" id="page-messages">
+                <div class="page-header">
+                    <h1>💾 对话内存</h1>
+                    <div style="display:flex;gap:8px">
+                        <input type="text" id="msgSearchInput" placeholder="搜索消息..." class="input-field" style="width:240px" onkeydown="if(event.key==='Enter')searchMessages()">
+                        <button class="btn btn-primary" onclick="searchMessages()">搜索</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>📈 消息统计</h2>
+                    <div class="stats-grid" id="msgStatsGrid" style="grid-template-columns:repeat(4,1fr)">
+                        <div class="stat-card"><div class="stat-icon">📊</div><div class="stat-value" id="msgTotal">-</div><div class="stat-label">总消息</div></div>
+                        <div class="stat-card"><div class="stat-icon">📅</div><div class="stat-value" id="msgToday">-</div><div class="stat-label">今日</div></div>
+                        <div class="stat-card"><div class="stat-icon">🔄</div><div class="stat-value" id="msgRecalled">-</div><div class="stat-label">撤回</div></div>
+                        <div class="stat-card"><div class="stat-icon">💻</div><div class="stat-value" id="msgDbSize">-</div><div class="stat-label">数据库大小</div></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>🗂️ 对话窗口</h2>
+                    <div id="windowsList" style="max-height:300px;overflow-y:auto"></div>
+                </div>
+                <div class="card">
+                    <h2>💬 消息列表</h2>
+                    <div id="messagesList" style="max-height:400px;overflow-y:auto"></div>
+                </div>
+                <div class="card">
+                    <h2>🔄 CHECKPOINT 压缩历史</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">Flash Lite 将过长上下文压缩为摘要的历史记录</p>
+                    <div id="checkpointList">加载中...</div>
+                    <div id="checkpointDetail" style="margin-top:12px;display:none">
+                        <h3 style="font-size:14px;margin-bottom:8px">📄 压缩详情</h3>
+                        <pre id="checkpointDetailContent" style="background:var(--bg-secondary);padding:12px;border-radius:8px;max-height:300px;overflow:auto;font-size:12px;line-height:1.4"></pre>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>🧹 数据清理</h2>
+                    <p>清理指定天数前的旧消息：</p>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input type="number" id="cleanupDays" value="30" min="1" class="input-field" style="width:100px">
+                        <span>天前</span>
+                        <button class="btn btn-danger" onclick="cleanupMessages()">清理</button>
+                    </div>
+                    <p id="cleanupResult" style="margin-top:8px;color:var(--success)"></p>
+                </div>
+            </section>
+
+            <!-- Memory -->
+            <section class="page hidden" id="page-memory">
+                <div class="page-header">
+                    <h1>📝 Memory 系统</h1>
+                    <div style="display:flex;gap:8px">
+                        <input type="text" id="memSearchInput" placeholder="搜索记忆..." class="input-field" style="width:240px" onkeydown="if(event.key==='Enter')loadMemory()">
+                        <button class="btn btn-primary" onclick="loadMemory()">搜索</button>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>📊 统计</h2>
+                    <div class="stats-grid" style="grid-template-columns:repeat(3,1fr)" id="memStatsGrid">
+                        <div class="stat-card"><div class="stat-icon">📝</div><div class="stat-value" id="memTotal">-</div><div class="stat-label">总记忆</div></div>
+                        <div class="stat-card"><div class="stat-icon">🏷️</div><div class="stat-value" id="memWorkspaces">-</div><div class="stat-label">工作区</div></div>
+                        <div class="stat-card"><div class="stat-icon">📌</div><div class="stat-value" id="memPinned">-</div><div class="stat-label">置顶</div></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>📋 记忆列表</h2>
+                    <div id="memList"></div>
+                </div>
+                <div class="card">
+                    <h2>📄 记忆详情</h2>
+                    <div id="memDetail" style="white-space:pre-wrap;font-family:monospace;font-size:13px">选择一条记忆查看详情</div>
+                </div>
+            </section>
+
+            <!-- Knowledge -->
+            <section class="page hidden" id="page-knowledge">
+                <div class="page-header">
+                    <h1>📖 Knowledge</h1>
+                    <button class="btn btn-secondary" onclick="loadKnowledge()">🔄 刷新</button>
+                </div>
+                <div class="card">
+                    <h2>📊 Knowledge 概览</h2>
+                    <div id="knowledgeStats"></div>
+                </div>
+                <div class="card">
+                    <h2>🗂️ 各窗口详情</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">展开查看每个窗口的 summary / mood / active_users</p>
+                    <div id="knowledgeWindows">加载中...</div>
+                </div>
+                <div class="card">
+                    <h2>👤 用户画像</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">FlashLite 自动维护的用户信息卡片 (QQ号 + 昵称 + 关键事实)</p>
+                    <div id="knowledgeProfiles">加载中...</div>
+                </div>
+                <div class="card">
+                    <h2>🧠 原始数据</h2>
+                    <pre id="knowledgeData" style="background:var(--bg-secondary);padding:16px;border-radius:8px;max-height:400px;overflow:auto;font-size:13px;line-height:1.5">加载中...</pre>
+                </div>
+            </section>
+
+            <!-- 成本监控 -->
+            <section class="page hidden" id="page-cost">
+                <div class="page-header">
+                    <h1>💰 成本监控</h1>
+                    <div style="display:flex;gap:8px">
+                        <select id="costPeriod" class="input-field" style="width:120px" onchange="window._costTimelineGran=null;loadCostPage()">
+                            <option value="today">今日</option>
+                            <option value="week" selected>近7日</option>
+                            <option value="month">近30日</option>
+                        </select>
+                        <button class="btn btn-secondary" onclick="loadCostPage()">🔄 刷新</button>
+                    </div>
+                </div>
+
+                <!-- 概览卡片 -->
+                <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)" id="costStatsGrid">
+                    <div class="stat-card">
+                        <div class="stat-icon">💵</div>
+                        <div class="stat-value" id="costTotalCny">¥0</div>
+                        <div class="stat-label">总花费 (CNY)</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📞</div>
+                        <div class="stat-value" id="costTotalCalls">0</div>
+                        <div class="stat-label">API 调用次数</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">⚡</div>
+                        <div class="stat-value" id="costCacheRate">0%</div>
+                        <div class="stat-label">KV Cache 命中率</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🔋</div>
+                        <div class="stat-value" id="costFlashliteCalls">0</div>
+                        <div class="stat-label">FlashLite 调用</div>
+                    </div>
+                </div>
+
+                <!-- USD 明细 -->
+                <div class="card" style="margin-top:20px">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <h2>💱 成本明细</h2>
+                        <span id="costUsdDetail" style="font-size:14px;color:var(--text-secondary)"></span>
+                    </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-top:12px">
+                        <div style="padding:12px;background:var(--bg-secondary);border-radius:8px">
+                            <div style="font-size:12px;color:var(--text-secondary)">Prompt Tokens</div>
+                            <div style="font-size:18px;font-weight:600;color:var(--text-primary)" id="costPromptTokens">0</div>
+                        </div>
+                        <div style="padding:12px;background:var(--bg-secondary);border-radius:8px">
+                            <div style="font-size:12px;color:var(--text-secondary)">Cached Tokens</div>
+                            <div style="font-size:18px;font-weight:600;color:var(--success)" id="costCachedTokens">0</div>
+                        </div>
+                        <div style="padding:12px;background:var(--bg-secondary);border-radius:8px">
+                            <div style="font-size:12px;color:var(--text-secondary)">Output Tokens</div>
+                            <div style="font-size:18px;font-weight:600;color:var(--accent)" id="costOutputTokens">0</div>
+                        </div>
+                        <div style="padding:12px;background:var(--bg-secondary);border-radius:8px">
+                            <div style="font-size:12px;color:var(--text-secondary)">Cache Storage (est.)</div>
+                            <div style="font-size:18px;font-weight:600;color:var(--warning)" id="costStorageFee">$0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 按模型分类 -->
+                <div class="card">
+                    <h2>🧠 按模型分类</h2>
+                    <div id="costByModel" style="margin-top:12px">加载中...</div>
+                </div>
+
+                <!-- 按窗口分类 -->
+                <div class="card">
+                    <h2>🗂️ 按窗口分类</h2>
+                    <div id="costByWindow" style="margin-top:12px">加载中...</div>
+                </div>
+
+                <!-- 调用趋势（Chart.js） -->
+                <div class="card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                        <h2>📈 调用趋势</h2>
+                        <div style="display:flex;gap:12px;align-items:center">
+                            <div style="display:flex;gap:4px">
+                                <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px" onclick="switchChartGranularity('hour')" id="granHour">⏰ 小时</button>
+                                <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px" onclick="switchChartGranularity('day')" id="granDay">📅 天</button>
+                            </div>
+                            <div id="chartDimensionTabs" style="display:flex;gap:4px">
+                                <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px" onclick="switchChartDimension('time')" id="tabTime">📅 时间</button>
+                                <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px" onclick="switchChartDimension('model')" id="tabModel">🧠 模型</button>
+                                <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px" onclick="switchChartDimension('window')" id="tabWindow">🗂️ 窗口</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="chartTimelineWrap" style="position:relative;height:280px;margin-top:12px">
+                        <canvas id="costChartTimeline"></canvas>
+                    </div>
+                    <div id="chartPieWrap" style="display:none;position:relative;height:280px;margin-top:12px">
+                        <canvas id="costChartPie"></canvas>
+                    </div>
+                </div>
+
+                <!-- 采样策略配置 -->
+                <div class="card">
+                    <h2>🎯 采样策略配置</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">控制 FlashLite 对群消息的采样频率。动态模式根据群活跃度自动调整间隔</p>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">采样模式</label>
+                            <select id="samplingMode" class="input-field" style="width:100%;margin-top:4px" onchange="toggleSamplingOptions()">
+                                <option value="fixed">固定间隔</option>
+                                <option value="dynamic">动态自适应</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">固定间隔 (每N条)</label>
+                            <input type="number" id="samplingFixedInterval" class="input-field" value="5" min="1" max="50" style="width:100%;margin-top:4px">
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">最少消息数</label>
+                            <input type="number" id="samplingMinMsgs" class="input-field" value="2" min="0" max="10" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">时间窗口内最少 N 条才触发</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">时间兜底 (秒)</label>
+                            <input type="number" id="samplingTimeInterval" class="input-field" value="60" min="30" max="600" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">超过 N 秒强制触发检查</p>
+                        </div>
+                    </div>
+                    <div id="dynamicSamplingOptions" style="display:none;margin-top:12px">
+                        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px">
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:13px">滑动窗口 (分钟)</label>
+                                <input type="number" id="samplingWindowMin" class="input-field" value="10" min="1" max="60" style="width:100%;margin-top:4px">
+                            </div>
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:13px">阈值 (逗号分隔)</label>
+                                <input type="text" id="samplingThresholds" class="input-field" value="5,15,30" style="width:100%;margin-top:4px">
+                                <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">活跃度分级阈值</p>
+                            </div>
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:13px">间隔 (逗号分隔)</label>
+                                <input type="text" id="samplingIntervals" class="input-field" value="3,5,10,15" style="width:100%;margin-top:4px">
+                                <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">各级对应间隔</p>
+                            </div>
+                            <div style="display:flex;align-items:end">
+                                <div style="padding:8px 12px;background:var(--bg-secondary);border-radius:8px;font-size:12px;color:var(--text-secondary);line-height:1.4">
+                                    💡 阈值数 = 间隔数 - 1<br>如 3级阈值 → 4级间隔
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;margin-top:12px">
+                        <button class="btn btn-primary" onclick="saveSamplingConfig()">💾 保存采样策略</button>
+                        <span id="samplingSaveResult" style="font-size:13px"></span>
+                    </div>
+
+                    <!-- R5: 群聊独立配置 -->
+                    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+                        <h3 style="font-size:15px;margin-bottom:8px">👥 群聊独立配置</h3>
+                        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">为特定群聊覆盖全局设置。未配置的群使用全局设置。禁用会完全阻止 FlashLite 在该群触发</p>
+                        <div id="groupOverridesTable" style="margin-bottom:12px">
+                            <!-- JS 动态填充 -->
+                        </div>
+                        <datalist id="knownGroupsList"></datalist>
+                        <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:12px">群号</label>
+                                <input type="text" id="groupOverrideId" class="input-field" list="knownGroupsList" placeholder="输入或选择群号" style="width:150px;margin-top:2px">
+                            </div>
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:12px">采样间隔</label>
+                                <input type="number" id="groupOverrideInterval" class="input-field" value="5" min="1" max="50" style="width:70px;margin-top:2px">
+                            </div>
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:12px">回复上限</label>
+                                <input type="number" id="groupOverrideReplyLimit" class="input-field" value="" min="0" max="65536" placeholder="不限" style="width:80px;margin-top:2px">
+                            </div>
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:12px">工具权限</label>
+                                <select id="groupOverrideToolPerm" class="input-field" style="width:100px;margin-top:2px">
+                                    <option value="full">全部</option>
+                                    <option value="search_only">仅搜索</option>
+                                    <option value="none">禁用</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="color:var(--text-secondary);font-size:12px">思考预算</label>
+                                <input type="number" id="groupOverrideThinkBudget" class="input-field" value="" min="0" max="32768" placeholder="默认" style="width:80px;margin-top:2px">
+                            </div>
+                            <button class="btn btn-secondary" onclick="addGroupOverride()" style="font-size:13px">➕ 添加</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Sandbox -->
+            <section class="page hidden" id="page-sandbox">
+                <div class="page-header">
+                    <h1>📦 Sandbox</h1>
+                    <button class="btn btn-secondary" onclick="loadSandbox()">刷新</button>
+                </div>
+                <div class="card">
+                    <h2>📊 资源统计</h2>
+                    <div id="sandboxStats"></div>
+                </div>
+                <div class="card">
+                    <h2>🛠️ 基础工具</h2>
+                    <div id="sandboxToolsList"><p style="color:var(--text-secondary)">加载中...</p></div>
+                </div>
+                <div class="card">
+                    <h2>📁 文件浏览器</h2>
+                    <div id="sandboxPath" style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">/</div>
+                    <div id="sandboxTree" style="font-family:monospace;font-size:13px"></div>
+                </div>
+                <div class="card">
+                    <h2>📄 文件预览</h2>
+                    <pre id="sandboxFileContent" style="background:var(--bg-secondary);padding:16px;border-radius:8px;max-height:500px;overflow:auto;font-size:13px">选择文件查看内容</pre>
+                </div>
+            </section>
+
+            <!-- 系统设置 -->
+            <section class="page hidden" id="page-settings">
+                <div class="page-header">
+                    <h1>⚙️ 系统设置</h1>
+                </div>
+                <div class="card">
+                    <h2>ℹ️ 系统信息</h2>
+                    <div id="systemInfo"></div>
+                </div>
+                <div class="card">
+                    <h2>🧩 插件管理</h2>
+                    <div id="pluginsList"></div>
+                </div>
+                <div class="card">
+                    <h2>👤 人格设定</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px" id="personaSource"></p>
+                    <textarea id="personaEditor" style="width:100%;height:200px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:13px;resize:vertical" placeholder="加载中..."></textarea>
+                    <div style="margin-top:8px;display:flex;align-items:center;gap:12px">
+                        <button class="btn btn-primary" onclick="savePersona()">保存人格设定</button>
+                        <span id="personaSaveResult" style="color:var(--success)"></span>
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:12px">💡 唤醒词在 AstrBot 配置中设置（当前：「老板娘」）。人格 Prompt 直接写入 AstrBot 数据库 personas 表。</p>
+                </div>
+                <div class="card">
+                    <h2>🔄 CHECKPOINT 策略</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">控制 Flash Lite T 文件上下文压缩的行为参数（三重守卫 + 压缩率保证）</p>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">Token 上限</label>
+                            <input type="number" id="cpTokenLimit" class="input-field" value="50000" min="10000" step="5000" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">超过此阈值触发压缩</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">保留消息数</label>
+                            <input type="number" id="cpKeepRecent" class="input-field" value="10" min="3" max="50" step="1" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">至少保留最近 N 条不压缩</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">压缩前比例</label>
+                            <input type="number" id="cpCompressFrontRatio" class="input-field" value="0.7" min="0.3" max="0.9" step="0.05" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">压缩 candidate 前 N%</p>
+                        </div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">冷却期 (秒)</label>
+                            <input type="number" id="cpCooldownSeconds" class="input-field" value="300" min="60" max="3600" step="30" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">两次压缩最小间隔</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">压缩率下限</label>
+                            <input type="number" id="cpTargetMin" class="input-field" value="0.20" min="0.05" max="0.50" step="0.05" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">摘要不短于原文此比例</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">压缩率上限</label>
+                            <input type="number" id="cpTargetMax" class="input-field" value="0.40" min="0.10" max="0.70" step="0.05" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">摘要不长于原文此比例</p>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;margin-top:12px">
+                        <button class="btn btn-primary" onclick="saveCheckpointStrategy()">💾 保存 CHECKPOINT 策略</button>
+                        <span id="cpStrategySaveResult" style="font-size:13px"></span>
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:8px">💡 三重守卫：Token 超限 + 消息数 > 保留数 + 冷却期已过，三者同时满足才触发压缩。压缩率区间用于验证压缩质量。</p>
+                </div>
+                <div class="card">
+                    <h2>📁 消息持久化策略</h2>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">热存储 (天)</label>
+                            <input type="number" id="storageHotDays" class="input-field" value="7" min="1" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">快速访问的近期消息</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">冷存储 (天)</label>
+                            <input type="number" id="storageColdDays" class="input-field" value="30" min="7" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">压缩保留的旧消息</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">归档 (天)</label>
+                            <input type="number" id="storageArchiveDays" class="input-field" value="90" min="30" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">超过此天数自动清理</p>
+                        </div>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:12px;margin-top:12px">
+                        <button class="btn btn-primary" onclick="saveStoragePolicy()">💾 保存策略</button>
+                        <span id="storagePolicySaveResult" style="font-size:13px"></span>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>🖼️ 图片缓存管理</h2>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">启用图片缓存</label>
+                            <div style="margin-top:8px">
+                                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                                    <input type="checkbox" id="imageCacheEnabled" checked style="width:18px;height:18px">
+                                    <span style="font-size:13px;color:var(--text-primary)">自动下载图片到本地</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">缓存上限 (MB)</label>
+                            <input type="number" id="imageCacheMaxMB" class="input-field" value="500" min="50" step="50" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">超出后自动清理最旧图片</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">缓存状态</label>
+                            <div id="imageCacheStatus" style="padding:10px;background:var(--bg-secondary);border-radius:6px;margin-top:4px;font-size:13px;color:var(--text-secondary)">
+                                检查中...
+                            </div>
+                        </div>
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:8px">💡 启用后，QQ 消息中的图片会自动下载到 QQ_data/images/ 目录。关闭后仅保存 CDN 外链（临时有效）。缓存路径: <code>QQ_data/images/</code></p>
+                </div>
+                <div class="card">
+                    <h2>🗄️ KV Cache 管理</h2>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">缓存 TTL (秒)</label>
+                            <input type="number" id="kvCacheTTL" class="input-field" value="3600" min="60" step="60" style="width:100%;margin-top:4px">
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">缓存状态</label>
+                            <div id="kvCacheStatus" style="padding:10px;background:var(--bg-secondary);border-radius:6px;margin-top:4px;font-size:13px;color:var(--text-secondary)">
+                                未连接
+                            </div>
+                        </div>
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:8px">💡 KV Cache 用于加速 Gemini API 的重复上下文处理。TTL 越长缓存命中率越高，但消耗更多 API 存储配额。</p>
+                </div>
+                <div class="card">
+                    <h2>🔄 定期 Review 设置</h2>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">Review 周期 (小时)</label>
+                            <input type="number" id="reviewIntervalHours" class="input-field" value="24" min="1" max="168" step="1" style="width:100%;margin-top:4px">
+                        </div>
+                        <div style="display:flex;align-items:end">
+                            <button class="btn btn-primary" onclick="saveReviewInterval()" style="width:100%">💾 保存</button>
+                        </div>
+                    </div>
+                    <p id="reviewIntervalResult" style="font-size:12px;margin-top:4px;min-height:16px"></p>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:4px">💡 控制 Sandbox 维护和画像语义 Review 的触发间隔。画像 Review 会让 FlashLite 自动整理合并重复用户信息。范围 1-168 小时。</p>
+                </div>
+                <div class="card">
+                    <h2>💬 消息分段设置</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">控制 Bot 回复的分段发送行为、延迟时间和短句合并</p>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">延迟模式</label>
+                            <select id="segIntervalMethod" class="input-field" style="width:100%;margin-top:4px">
+                                <option value="adaptive">自适应 (推荐)</option>
+                                <option value="random">固定随机</option>
+                                <option value="log">对数</option>
+                            </select>
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">自适应: 短句快、长句慢</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">短句合并阈值 (字)</label>
+                            <input type="number" id="segMergeThreshold" class="input-field" value="80" min="0" max="200" step="10" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">相邻短句合并字数上限，0=不合并</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">MD清洗规则 (正则)</label>
+                            <input type="text" id="segCleanupRule" class="input-field" value="" style="width:100%;margin-top:4px" placeholder="留空不清洗">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">清除 Markdown 格式符号</p>
+                        </div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">短句延迟 (秒)</label>
+                            <input type="text" id="segDelayShort" class="input-field" value="0.8,1.5" style="width:100%;margin-top:4px" placeholder="0.8,1.5">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">≤15字，格式: 最小,最大</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">中句延迟 (秒)</label>
+                            <input type="text" id="segDelayMedium" class="input-field" value="1.5,3.0" style="width:100%;margin-top:4px" placeholder="1.5,3.0">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">16-40字，格式: 最小,最大</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">长句延迟 (秒)</label>
+                            <input type="text" id="segDelayLong" class="input-field" value="2.5,4.5" style="width:100%;margin-top:4px" placeholder="2.5,4.5">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">>40字，格式: 最小,最大</p>
+                        </div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">最大分段数</label>
+                            <input type="number" id="segMaxSegments" class="input-field" value="3" min="0" max="10" step="1" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">超出的强制合并，0=不限制</p>
+                        </div>
+                        <div style="display:flex;align-items:end">
+                            <div>
+                                <button class="btn btn-primary" onclick="saveSegmentedReply()" style="width:100%">💾 保存分段设置</button>
+                                <p id="segSaveResult" style="font-size:12px;margin-top:4px;min-height:16px"></p>
+                            </div>
+                        </div>
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:8px">💡 合并阈值控制多条短句合并为一条的字数上限。修改后需重启 AstrBot 生效。</p>
+                </div>
+                <!-- ======== 表情包管理卡片 ======== -->
+                <div class="card">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                        <h2 style="margin:0">🎭 表情包管理</h2>
+                        <span id="emojiCount" style="font-size:13px;color:var(--text-secondary)">加载中...</span>
+                    </div>
+                    <!-- 表情包设置 -->
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;padding:12px;background:var(--surface-hover);border-radius:10px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">第几条消息后发送</label>
+                            <input type="number" id="emojiSendAfterSegment" class="input-field" value="1" min="1" max="20" step="1" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">插入到分段队列的第 N 条后</p>
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">发送概率</label>
+                            <input type="number" id="emojiProbability" class="input-field" value="0.7" min="0" max="1" step="0.05" style="width:100%;margin-top:4px">
+                            <p style="font-size:11px;color:var(--text-secondary);margin-top:2px">0=不发 1=必发 0.7=70%</p>
+                        </div>
+                        <div style="display:flex;align-items:end;gap:8px">
+                            <button class="btn btn-secondary" onclick="saveEmojiSettings()" style="flex:1">💾 保存</button>
+                            <span id="emojiSettingsSaveResult" style="font-size:12px"></span>
+                        </div>
+                    </div>
+                    <!-- 操作栏 -->
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                        <button class="btn btn-primary" onclick="document.getElementById('emojiUploadInput').click()" style="font-size:13px">📤 上传表情包</button>
+                        <input type="file" id="emojiUploadInput" accept=".jpg,.jpeg,.png,.gif,.webp" multiple style="display:none" onchange="uploadEmojis(this.files)">
+                        <button class="btn btn-secondary" onclick="loadEmojiGrid()" style="font-size:13px">🔄 刷新</button>
+                        <p style="font-size:12px;color:var(--text-secondary);margin:0;margin-left:auto">上传时文件名即为关键词（空格分隔）</p>
+                    </div>
+                    <!-- 表情包网格 -->
+                    <div id="emojiGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;max-height:520px;overflow-y:auto;padding:4px">
+                        <!-- JS 动态填充 -->
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:12px">💡 关键词从文件名自动解析（空格分隔）。点击 ✏️ 编辑关键词。修改后需重启 AstrBot 生效。</p>
+                </div>
+                <div class="card">
+                    <h2>🛠️ 调试模式</h2>
+                    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0">
+                        <div>
+                            <span style="font-size:14px">显示工具调用状态</span>
+                            <p style="font-size:12px;color:var(--text-secondary);margin-top:2px">开启后，Bot 调用搜索等工具时会在群里发送 "🔨 调用工具: xxx" 消息</p>
+                        </div>
+                        <label class="toggle-switch" style="flex-shrink:0;margin-left:16px">
+                            <input type="checkbox" id="showToolUseToggle" onchange="toggleToolDebug()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <p id="toolDebugResult" style="font-size:12px;margin-top:4px;min-height:16px"></p>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:4px">⚠️ 修改后需重启 AstrBot 生效。调试时可打开，正常使用建议关闭。</p>
+                </div>
+                <div class="card">
+                    <h2>🔒 安全设置</h2>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">设置 Web 控制台的访问密码</p>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">新密码</label>
+                            <input type="password" id="consolePassword" class="input-field" placeholder="留空则不启用密码保护" style="width:100%;margin-top:4px">
+                        </div>
+                        <div>
+                            <label style="color:var(--text-secondary);font-size:13px">确认密码</label>
+                            <input type="password" id="consolePasswordConfirm" class="input-field" placeholder="再次输入密码" style="width:100%;margin-top:4px">
+                        </div>
+                    </div>
+                    <div style="margin-top:8px;display:flex;align-items:center;gap:12px">
+                        <button class="btn btn-primary" onclick="saveConsolePassword()">💾 保存密码</button>
+                        <span id="passwordSaveResult" style="font-size:13px"></span>
+                    </div>
+                    <p style="font-size:12px;color:var(--text-secondary);margin-top:8px">⚠️ 密码保护功能将在下次重启 BossLady Console 后生效。留空两个输入框可以清除密码保护。</p>
+                </div>
+                <div class="card">
+                    <h2>📦 数据导出/导入</h2>
+                    <p>将 QQ_data / Memory / Sandbox 打包导出：</p>
+                    <button class="btn btn-secondary" onclick="exportData()">导出数据</button>
+                    <p id="exportResult" style="margin-top:8px"></p>
+                    <hr style="border-color:var(--border);margin:16px 0">
+                    <p>从之前的导出包恢复数据（自动合并，不覆盖已有文件）：</p>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+                        <div class="file-upload-wrap">
+                            <label class="file-upload-label" for="importFile">📁 选择文件</label>
+                            <input type="file" id="importFile" accept=".zip" onchange="document.getElementById('importFileName').textContent=this.files[0]?.name||'未选择'">
+                            <span class="file-upload-name" id="importFileName">未选择任何文件</span>
+                        </div>
+                        <button class="btn btn-primary" onclick="importData()">导入并合并</button>
+                    </div>
+                    <p id="importResult" style="margin-top:8px"></p>
+                </div>
+                <div class="card">
+                    <h2>📋 系统日志</h2>
+                    <button class="btn btn-secondary" onclick="loadLogs()">加载最新日志</button>
+                    <pre id="logContent" style="background:var(--bg-secondary);padding:16px;border-radius:8px;max-height:400px;overflow:auto;font-size:12px;margin-top:8px;line-height:1.4"></pre>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

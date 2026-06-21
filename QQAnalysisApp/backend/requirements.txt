@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+requests
+websockets
+openai
+pydantic
+aiohttp

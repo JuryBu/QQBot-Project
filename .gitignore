@@ -1,0 +1,103 @@
+# ============================================================
+# 老板娘 QQBot 工程 .gitignore
+# 原则：定制代码/文档入库；运行数据/隐私/大文件/真身配置 排除
+# ============================================================
+
+# ===== 虚拟环境 =====
+venv/
+.venv/
+**/venv/
+**/.venv/
+
+# ===== 依赖 / 包 =====
+**/node_modules/
+**/site-packages/
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+
+# ===== NapCat 协议端本体（大、第三方、含 token/真实QQ号） =====
+/NapCat_v4.17.53/
+/NapCat.Shell.Windows.OneKey/
+
+# ===== 大文件 / 安装包 =====
+*.exe
+*.zip
+*.7z
+*.tar.gz
+
+# ===== 运行时数据（含真人隐私，勿入库） =====
+/QQ_data/
+/Memory/
+/Knowledge/
+/Sandbox/
+/数据导出/
+/export/
+/表情包/
+/data/
+
+# ===== 数据库 / 日志 =====
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+
+# ===== AstrBot 运行数据细分（不能整目录 ignore，含定制插件代码） =====
+/AstrBot/logs/
+/AstrBot/data/data_v3.db
+/AstrBot/data/data_v4.db
+/AstrBot/data/data_v4.db-*
+/AstrBot/data/dashboard.zip
+/AstrBot/data/knowledge_base/
+/AstrBot/data/temp/
+/AstrBot/data/logs/
+/AstrBot/data/webchat/
+/AstrBot/data/attachments/
+/AstrBot/data/dist/
+/AstrBot/data/site-packages/
+/AstrBot/data/plugin_data/
+/AstrBot/data/py_interpreter_shared/
+/AstrBot/data/py_interpreter_workplace/
+/AstrBot/data/skills/
+/AstrBot/data/plugins.json
+/AstrBot/data/astrbot_plugin_group_chat/
+
+# ===== AstrBot 框架自身运行/构建产物 =====
+/AstrBot/dashboard/node_modules/
+/AstrBot/dashboard/dist/
+/AstrBot/__pycache__/
+
+# ===== 定制插件内的运行数据（保代码、排数据） =====
+/AstrBot/data/plugins/astrbot_plugin_flashlite/Sandbox/
+/AstrBot/data/plugins/astrbot_plugin_pixiv_search/data/
+**/plugins/**/__pycache__/
+
+# ===== 敏感配置（含明文密钥），全局排除真身，仅放行脱敏模板 =====
+cmd_config.json
+!cmd_config.example.json
+.env
+*.local
+
+# ===== 接班分析过程文档（含海量真实隐私：QQ号/完整key/明文密码/本机路径，仅本地留存） =====
+# 注：包含对话导出、调研/找茬/bug审查/S0准备 等全部过程文档；本地保留，不入 public
+/QQBotPlan/_接班理解/
+
+# ===== QAApp / IDE 状态 =====
+/QQAnalysisApp/backend/uploads/
+**/.idea/
+.vscode/
+*.iml
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== 旧代码 / 老脚本 / 大数据（含本机路径或体量大，不入库） =====
+/AstrBot_old/
+/launcher_astrbot_en.bat
+/chinesebqb.json

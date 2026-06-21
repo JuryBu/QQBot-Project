@@ -1,0 +1,9 @@
+**发现**
+- 高：Stage 6 现在会把 T 文件写乱。[main.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:677)、[main.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:2931)、[main.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:3362) 这组逻辑把当前 user 先预写入 T 文件，但后面仍按“`req.contexts` 的前缀”做尾部切片增量同步；正常时序下会重复追加最新 user，并漏掉中间 assistant。`assistant` 补录又被 `len(new_msgs) == 0` 卡住，无法自愈。
+- 高：Stage 5 的 storage 费算法不符合 Gemini 官方语义。[cost_tracker.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/cost_tracker.py:179)、[main.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:1694)、[kv_cache.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/kv_cache.py:26) 现在用 `cachedContentTokenCount`/`input_cached` 同时算“命中费”和“存储费”，等于同一批 cache 每次 hit 都再收一次 storage。官方文档把 cache-hit 计费和 TTL 存储计费分开，而且 TTL 没有最小值。
+- 中：Stage 6 每条消息都 `await append_messages()`，会在窗口锁里做整文件 `load -> save`。[main.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/main.py:677)、[checkpoint.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py:274)、[checkpoint.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/checkpoint.py:349) 在高频群聊下会形成明显锁竞争和 I/O 串行瓶颈。
+
+`_calc_cost()` 返回元组这件事本身没有漏改：直接调用方只剩 `record()` 一处，解构是正确的。前端/后端 `storage_cost_usd` 展示链路也接通了。
+
+完整审查已写入 [Review_Stage5_6.md](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/Review_Stage5_6.md)。  
+Storage 费判断参考官方文档：<https://ai.google.dev/gemini-api/docs/caching/> ，<https://ai.google.dev/gemini-api/docs/pricing?hl=pt-br> 。

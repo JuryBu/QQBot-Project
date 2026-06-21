@@ -1,0 +1,13 @@
+**发现**
+- 控制台默认监听 `0.0.0.0:8090` 且没有任何鉴权，同时还会把 NapCat 原始 token 返回给前端；现有接口里已经包含配置写入、记忆增删改、消息清理、人格修改和数据导出，风险很高。[main.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/main.py#L50) [bot.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routers/bot.py#L73) [start_bosslady.bat](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/start_bosslady.bat#L27)
+- Stage 12 的消息浏览器、仪表盘统计和导出逻辑仍硬编码 `QQ_data/messages.db` 与旧表结构；当前仓库真实消息库是 `AstrBot/data/data_v4.db`，所以这些页面在现状下基本不可用。[messages.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routes/messages.py#L16) [dashboard.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routers/dashboard.py#L13) [system.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routes/system.py#L115)
+- 模型配置页读取的是过时的 `cmd_config.json` schema，Flash Lite 配置还写到了运行时不会读取的 `config.json`；实测接口返回空 key、空 model，并提示“未配置 API Key”。[models.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routers/models.py#L13) [cmd_config.json](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/cmd_config.json#L45) [_conf_schema.json](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/data/plugins/astrbot_plugin_flashlite/_conf_schema.json#L1)
+- `Memory` / `Knowledge` 接口在独立启动控制台时会直接导入失败，因为这里只加了插件目录，没有把 `AstrBot` 包本身放进 `sys.path`；实测错误是 `No module named 'astrbot'`。[data.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routes/data.py#L21)
+- NapCat 的启动和目录发现逻辑互相不一致，当前仓库下会指向 `NapCat.Shell.Windows.OneKey` 而不是带 `webui.json` 的实际目录，`/api/bot/napcat/webui-url` 会直接 404。[start_bosslady.bat](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/start_bosslady.bat#L9) [bot.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routers/bot.py#L15)
+- 人格设定页读写的都不是 AstrBot 当前真实生效的数据源；读取时把 `persona` 当字典，保存时又写入不会生效的 `provider_settings.persona_prompt`。[system.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routes/system.py#L58) [persona_mgr.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/AstrBot/astrbot/core/persona_mgr.py#L105)
+- `/api/data/sandbox/tree` 的路径校验又回到了前缀匹配，存在同前缀兄弟目录逃逸风险。[data.py](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/BossLady_Console/backend/routes/data.py#L139)
+
+**报告**
+审查报告已保存到 [报告_Stage11-12_Web控制台_Codex.md](/c:/Users/<user>/Desktop/AstrBotLauncher-0.1.5.6/QQBotPlan/报告_Stage11-12_Web控制台_Codex.md)。
+
+我做了路由级验证，确认高优先级问题都能在当前仓库直接复现；关键结论也已写入记忆系统，后续如果你要我继续修这批问题，我建议先按“鉴权/暴露面 → 数据桥接 → NapCat/Persona/前端完成度”这个顺序收敛。
