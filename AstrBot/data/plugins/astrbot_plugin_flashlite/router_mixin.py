@@ -275,6 +275,10 @@ class RouterMixin:
         priority=998: 在持久化(9999)之后，在 context_enhancer 等常规插件之前
         不调用 stop_event()，让消息继续传播
         """
+        # S3 F3.1: 每条消息到达即取全局单调纳秒戳，作为 receive_seq 去重键地基。
+        # 必须在最前面、每条消息都设，time.time_ns() 保证全局单调唯一。
+        event._receive_ts_ns = time.time_ns()
+
         raw = event.message_obj.raw_message
         if raw is None:
             return
@@ -336,9 +340,20 @@ class RouterMixin:
             try:
                 if content and self._t_file_mgr:
                     _window_key = f"GroupMessage:{group_id}"
+                    _mid = _get(raw, "message_id")
                     _user_msg = {
                         "role": "user",
                         "content": f"[{sender_name}] {content}" if sender_name else content,
+                        # S3 F3.1: 顶层结构化字段（checkpoint v2 落盘读取）
+                        "message_id": _mid if _mid is not None else None,
+                        "sender": {
+                            "qq": sender_qq,
+                            "name": sender_name,
+                            "is_bot": False,
+                        },
+                        "receive_seq": getattr(event, "_receive_ts_ns", None),
+                        "has_multimodal": self._detect_multimodal(raw),
+                        # S1 兼容：保留原 meta 结构不破坏旧消费方
                         "meta": {
                             "sender_qq": sender_qq,
                             "sender_name": sender_name,
@@ -401,9 +416,20 @@ class RouterMixin:
             try:
                 if content and self._t_file_mgr:
                     _window_key = f"FriendMessage:{user_id}"
+                    _mid = _get(raw, "message_id")
                     _user_msg = {
                         "role": "user",
                         "content": f"[{sender_name}] {content}" if sender_name else content,
+                        # S3 F3.1: 顶层结构化字段（checkpoint v2 落盘读取）
+                        "message_id": _mid if _mid is not None else None,
+                        "sender": {
+                            "qq": user_id,
+                            "name": sender_name,
+                            "is_bot": False,
+                        },
+                        "receive_seq": getattr(event, "_receive_ts_ns", None),
+                        "has_multimodal": self._detect_multimodal(raw),
+                        # S1 兼容：保留原 meta 结构不破坏旧消费方
                         "meta": {
                             "sender_qq": user_id,
                             "sender_name": sender_name,
@@ -1009,3 +1035,16 @@ class RouterMixin:
             parts.append(message)
 
         return " ".join(parts).strip()
+
+    # S3 F3.1: 多模态媒体类型集合（图片/语音/视频/文件）。
+    _MULTIMODAL_SEG_TYPES = frozenset({"image", "record", "video", "file"})
+
+    @classmethod
+    def _detect_multimodal(cls, raw: Any) -> bool:
+        """检测 OneBot 消息段中是否含图片/媒体（has_multimodal 来源）"""
+        message = raw.get("message", []) if isinstance(raw, dict) else getattr(raw, "message", [])
+        if isinstance(message, list):
+            for seg in message:
+                if isinstance(seg, dict) and seg.get("type") in cls._MULTIMODAL_SEG_TYPES:
+                    return True
+        return False
