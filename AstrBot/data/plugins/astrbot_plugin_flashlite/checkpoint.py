@@ -812,19 +812,40 @@ class TFileManager:
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
+            # S3 批3.5-D(nondict-json): 合法 JSON 但顶层非 dict(文件被截断成 [...]、
+            # 裸数字/字符串)时，下方 data.get 会抛 AttributeError 穿透损坏兜底。
+            # 显式判型并当损坏处理（参照 round_tracker.load_state 的同款防御）。
+            if not isinstance(data, dict):
+                raise TypeError(f"T 文件顶层非 dict: {type(data).__name__}")
+
             # S3 F1.1: 版本兼容检查 —— v1 自动迁移到 v2（绝不重建，约束 5）
             version = data.get("version")
             if version == 1:
                 data = _migrate_v1_to_v2(data)
                 await self.save(window_key, data)
             elif version != 2:
-                # 未知版本（既非 1 也非 2）：保守起见仅补齐 metadata，不删消息
+                # 未知版本（既非 1 也非 2）：补齐 metadata + message v2 字段，不删消息
                 logger.warning(
-                    f"[T-FILE] 未知版本({version})，补齐 metadata v2 字段后沿用"
+                    f"[T-FILE] 未知版本({version})，补齐 v2 字段后沿用"
                 )
                 _ensure_metadata_v2_fields(data.setdefault("metadata", {}))
+                # S3 批3.5-D(unknown-version-skips-message-legacy): 补 message-level
+                # v2 字段 + legacy（version=None 丢版本的真 v1 文件落此分支时，旧消息
+                # 也要补齐，否则字段缺失被 version=2 永久固化）。
+                for _m in data.get("messages", []):
+                    if isinstance(_m, dict):
+                        _ensure_message_v2_fields(_m, legacy=True)
                 data["version"] = 2
                 await self.save(window_key, data)
+            else:
+                # version == 2: S3 批3.5-D(v2-fastpath-skips-metadata-backfill)
+                # 批3a 前生成的 v2 文件 metadata 缺 generation 等后加字段，快路径补齐；
+                # 仅当确有字段被补上才 save（避免每次 load 都写盘）。
+                _md = data.setdefault("metadata", {})
+                _before = len(_md)
+                _ensure_metadata_v2_fields(_md)
+                if len(_md) != _before:
+                    await self.save(window_key, data)
 
             return data
 
@@ -1588,7 +1609,11 @@ class TFileManager:
             if compressed_last_round_id is not None:
                 rec_state = t_file["metadata"].setdefault("record_state", {})
                 prev_lcr = rec_state.get("last_compressed_round_id")
-                if prev_lcr is None or compressed_last_round_id > prev_lcr:
+                # S3 批3.5-D(lcr-string-compare): 数值比较而非字符串字典序，防号位超
+                # 6 位(单窗口百万轮)后 'r1000000' < 'r999999' 致单调 max 永久冻结。
+                if prev_lcr is None or round_tracker.parse_round_id(
+                    compressed_last_round_id
+                ) > round_tracker.parse_round_id(prev_lcr):
                     rec_state["last_compressed_round_id"] = compressed_last_round_id
 
             # 更新平均压缩率

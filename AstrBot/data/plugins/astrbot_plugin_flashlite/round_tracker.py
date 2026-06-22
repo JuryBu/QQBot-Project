@@ -71,6 +71,20 @@ def format_step_id(n: int) -> str:
     return f"s{n:08d}"
 
 
+def parse_round_id(rid: str) -> int:
+    """解析 round_id 字符串为整数（r000123 → 123）；非法/None 返回 -1。
+
+    S3 批3.5-D(lcr-string-compare): record_state 单调比较改用数值，防号位超 6 位
+    （单窗口百万轮）后字符串字典序失真（'r1000000' < 'r999999'）致单调 max 冻结。
+    """
+    if not rid or not isinstance(rid, str) or not rid.startswith("r"):
+        return -1
+    try:
+        return int(rid[1:])
+    except ValueError:
+        return -1
+
+
 # ========================
 # state.json 初始结构
 # ========================
@@ -301,6 +315,12 @@ def save_state(checkpoints_dir: str, window_key: str, state: Dict[str, Any]) -> 
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+            # S3 批3.5-D(savestate-missing-fsync): flush+fsync 强制落盘再 rename，
+            # 对齐 checkpoint.save(F1.7)——防 rename 已生效但内容仍在 OS page cache
+            # 未落盘时断电，重启后 state.json 撕裂/空洞致划轮边界回退（与 T 文件
+            # 构成「两次独立写盘」的另一半，不能只加固一边）。
+            f.flush()
+            os.fsync(f.fileno())
         # 原子重命名（Windows 上 os.replace 可覆盖已存在目标）
         os.replace(tmp_path, fp)
     except Exception:
