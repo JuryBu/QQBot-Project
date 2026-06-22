@@ -141,6 +141,8 @@ def _create_empty_t_file(window_key: str) -> dict:
             # S3 F1.1: 取号号源（唯一取号入口 round_tracker.assign_round 就地 +1）
             "next_round_id": 1,
             "next_step_id": 1,
+            # S3 F2.2: 与 {window}.state.json 交叉校验的代号（save 时 ++，恢复取大者修正小者）
+            "generation": 0,
             # S3 占位状态字典（S4/S5/S6 消费，S3 留空）
             "record_state": {"last_compressed_round_id": None},
             "bpc_state": {},
@@ -173,6 +175,8 @@ _MESSAGE_V2_DEFAULTS = {
 _METADATA_V2_DEFAULTS = {
     "next_round_id": 1,
     "next_step_id": 1,
+    # S3 F2.2: generation 交叉校验代号（与 state.json 同步推进，恢复取大者修正小者）
+    "generation": 0,
     "record_state": {"last_compressed_round_id": None},
     "bpc_state": {},
     "concurrency_state": {},
@@ -422,6 +426,120 @@ def _repair_tool_call_pairs(
     return repaired, repairs
 
 
+# ========================
+# S3 F1.4: buffer WAL（崩溃可恢复，约束 6）
+# ========================
+#
+# buffer_message 是高频热路径（群活跃时每秒多条），纯内存 buffer 崩溃可丢几十条。
+# WAL（Write-Ahead Log）方案：buffer_message 入口同步 append 一行 JSON 到
+# ``{window安全文件名}.buffer.wal.jsonl``（append-only，绝不重写整文件），
+# flush_buffer 落盘成功后删除该 WAL 文件。崩溃重启时 replay WAL（F2.2）。
+#
+# 每行带 message_id 用于 replay 去重；buffer 阶段消息常无 message_id（QQ 上报
+# 的 user 消息有，但 assistant 补录 / synthetic 可能没有），此时用
+# ``{window_key}#seq{N}`` 临时键兜底（仅用于 WAL 内部去重，不污染 message 字段）。
+
+WAL_SUFFIX = ".buffer.wal.jsonl"
+
+
+def wal_file_path(checkpoints_dir: str, window_key: str) -> str:
+    """计算 {window}.buffer.wal.jsonl 路径（与 T 文件 / state.json 并列，命名一致）。"""
+    safe_name = window_key.replace(":", "_")
+    return os.path.join(checkpoints_dir, f"{safe_name}{WAL_SUFFIX}")
+
+
+def wal_dedup_key(msg: dict, window_key: str, fallback_seq: int) -> str:
+    """计算一条 WAL 消息的去重键。
+
+    优先用 message_id（QQ 上报的 user 消息天然带）；缺失时用
+    ``{window_key}#seq{N}`` 临时键（N=该窗口 WAL 内单调递增序号）。
+    临时键只进 WAL 行的 ``_wal_key`` 字段，不写回 message 本体。
+    """
+    mid = msg.get("message_id")
+    if mid is not None and mid != "":
+        return f"mid:{mid}"
+    return f"{window_key}#seq{fallback_seq}"
+
+
+def wal_append(checkpoints_dir: str, window_key: str, msg: dict, dedup_key: str) -> None:
+    """同步追加一行 JSON 到 WAL（append-only，绝不重写整文件）。
+
+    一行 = {"_wal_key": 去重键, "msg": 原始消息 dict}。
+    高频群每条 append < 1ms（仅一次 open(a)+write+close）。
+    写失败仅记日志，绝不抛出阻断主链路（WAL 是兜底，丢一行不致命）。
+    """
+    fp = wal_file_path(checkpoints_dir, window_key)
+    line = json.dumps({"_wal_key": dedup_key, "msg": msg}, ensure_ascii=False)
+    try:
+        os.makedirs(checkpoints_dir, exist_ok=True)
+        with open(fp, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:  # noqa: BLE001 — WAL 失败不能拖垮主链路
+        logger.error(f"[T-FILE] WAL append 失败 {window_key}: {e}")
+
+
+def wal_read(checkpoints_dir: str, window_key: str) -> List[dict]:
+    """读取 WAL 全部行（每行解析为 {"_wal_key", "msg"}）。
+
+    文件不存在 → []。坏行（JSON 解析失败）跳过并记日志，不阻断 replay。
+    """
+    fp = wal_file_path(checkpoints_dir, window_key)
+    if not os.path.exists(fp):
+        return []
+    entries: List[dict] = []
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            for lineno, raw in enumerate(f, 1):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"[T-FILE] WAL 坏行跳过 {window_key}:{lineno}: {e}")
+                    continue
+                if isinstance(obj, dict) and isinstance(obj.get("msg"), dict):
+                    entries.append(obj)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[T-FILE] WAL 读取失败 {window_key}: {e}")
+    return entries
+
+
+def wal_clear(checkpoints_dir: str, window_key: str) -> None:
+    """删除 WAL 文件（flush 落盘成功 / replay 完成后调用）。文件不存在则静默。"""
+    fp = wal_file_path(checkpoints_dir, window_key)
+    try:
+        if os.path.exists(fp):
+            os.remove(fp)
+    except OSError as e:
+        logger.error(f"[T-FILE] WAL 清理失败 {window_key}: {e}")
+
+
+def gc_orphan_tmp_files(checkpoints_dir: str) -> int:
+    """GC：扫 checkpoints 目录下 ``.t_file_*.tmp`` / ``.state_*.tmp`` 残留并删除。
+
+    这些是 save / save_state 原子写崩在「写临时文件」与「os.replace」之间留下的
+    半成品。启动期全扫一次（F2.2 步骤 1）。返回删除数量。
+    """
+    if not os.path.isdir(checkpoints_dir):
+        return 0
+    removed = 0
+    try:
+        for name in os.listdir(checkpoints_dir):
+            if (name.startswith(".t_file_") or name.startswith(".state_")) \
+                    and name.endswith(".tmp"):
+                try:
+                    os.remove(os.path.join(checkpoints_dir, name))
+                    removed += 1
+                except OSError as e:
+                    logger.warning(f"[T-FILE] tmp GC 删除失败 {name}: {e}")
+    except OSError as e:
+        logger.error(f"[T-FILE] tmp GC 扫描失败 {checkpoints_dir}: {e}")
+    if removed:
+        logger.info(f"[T-FILE] 启动 GC 清理半写临时文件 {removed} 个")
+    return removed
+
+
 def serialize_messages_for_compress(messages: List[dict]) -> str:
     """将 OpenAI 格式消息列表序列化为压缩 prompt 用的文本"""
     lines = []
@@ -499,25 +617,86 @@ class TFileManager:
         self._compressing: set = set()
         # Per-window 内存消息缓冲区（减少高频 I/O）
         self._msg_buffer: Dict[str, List[dict]] = {}
+        # S3 F1.4: per-window WAL 临时键序号（message_id 缺失时兜底去重用，单调递增）
+        self._wal_seq: Dict[str, int] = {}
+        # S3 F2.2: 本进程「认领」的 in-flight WAL 窗口集合。
+        # buffer_message 一旦往某窗口写 WAL，该窗口的 WAL 即本进程 in-flight 镜像
+        # （等待 flush），**不是**上次崩溃残留 → load 触发的恢复对这些窗口跳过 replay
+        # （否则会与内存 buffer 的 _merge_buffer 视图重复计数）。flush/clear 后移除。
+        self._wal_owned: set = set()
+        # S3 F2.2: 已做过崩溃恢复的窗口集合（按需恢复，每窗口仅在首次 load 触发一次）
+        self._recovered: set = set()
+        # S3 F2.2: 恢复专用锁（与业务 _get_lock 分离）。
+        # load() 可能由已持有业务锁的调用方触发（append_messages/flush_buffer 持锁后
+        # 调 load），若恢复复用业务锁会与之死锁（asyncio.Lock 不可重入）。恢复内部
+        # 全程不抢业务锁（仅 _load_t_file_raw / _append_messages_inner / save，皆无锁），
+        # 故用独立锁串行化「同窗口并发首次 load」即可。
+        self._recover_locks: Dict[str, asyncio.Lock] = {}
         # 确保 checkpoints 目录存在
         os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
+        # S3 F2.2 步骤 1：启动期全扫 GC 半写临时文件（.t_file_*.tmp / .state_*.tmp）。
+        # 仅这一项启动时全扫一次；窗口级 WAL replay 走按需恢复（见 load()）。
+        try:
+            gc_orphan_tmp_files(CHECKPOINTS_DIR)
+        except Exception as e:  # noqa: BLE001 — GC 失败不阻断启动
+            logger.error(f"[T-FILE] 启动 tmp GC 异常: {e}")
 
     def buffer_message(self, window_key: str, msg: dict) -> None:
-        """纯内存追加消息到缓冲区（无锁无I/O，用于高频路径）
-        
-        消息会在下次 load() / flush_buffer() 时批量写入磁盘。
+        """纯内存追加消息到缓冲区 + 同步写 WAL（崩溃可恢复，约束 6 / F1.4）。
+
+        消息会在下次 load() / flush_buffer() 时批量写入磁盘 T 文件。
+        WAL 是兜底：进程在 flush 前崩溃时，重启 replay WAL（F2.2）补回这批消息。
+        WAL append-only，flush_buffer 成功后清理（见 flush_buffer）。
+
+        首次接触某窗口（本进程内）时，磁盘上若已有 WAL 文件，那是**上次进程崩溃
+        的残留**（buffer_message 同步、无法 async replay）：把残留消息吸收进内存
+        buffer（随本批一起正常 flush 取号落盘，不丢），清掉旧 WAL，再从本条起重写
+        本进程的 in-flight WAL。重复由 _append_messages_inner 的 message_id 去重兜底。
         """
+        first_touch = (
+            window_key not in self._msg_buffer
+            and window_key not in self._wal_owned
+        )
         if window_key not in self._msg_buffer:
             self._msg_buffer[window_key] = []
+
+        if first_touch:
+            # 吸收上次崩溃残留 WAL（若有），避免与本进程新 WAL 行混在同一文件
+            residual = wal_read(CHECKPOINTS_DIR, window_key)
+            if residual:
+                for entry in residual:
+                    rmsg = entry.get("msg")
+                    if isinstance(rmsg, dict):
+                        self._msg_buffer[window_key].append(rmsg)
+                logger.warning(
+                    f"[T-FILE] buffer 首次接触 {window_key}: 吸收残留 WAL "
+                    f"{len(residual)} 条（随本批 flush 落盘）"
+                )
+                wal_clear(CHECKPOINTS_DIR, window_key)
+            # 本进程认领该窗口 WAL（in-flight），并标记已恢复（无需 load 再 replay）
+            self._wal_owned.add(window_key)
+            self._recovered.add(window_key)
+            self._wal_seq[window_key] = 0
+
         # 添加时间戳
         if "timestamp" not in msg:
             msg["timestamp"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         self._msg_buffer[window_key].append(msg)
 
+        # ---- F1.4 WAL：同步追加一行（append-only，绝不重写整文件）----
+        seq = self._wal_seq.get(window_key, 0)
+        dedup_key = wal_dedup_key(msg, window_key, seq)
+        self._wal_seq[window_key] = seq + 1
+        wal_append(CHECKPOINTS_DIR, window_key, msg, dedup_key)
+
     async def flush_buffer(self, window_key: str) -> None:
-        """将缓冲区中的消息批量写入 T 文件磁盘（带锁）"""
+        """将缓冲区中的消息批量写入 T 文件磁盘（带锁），落盘成功后清理 WAL（F1.4）。"""
         pending = self._msg_buffer.pop(window_key, [])
         if not pending:
+            # buffer 空但可能残留空 WAL（极端情况）：顺手清掉，重置 seq / owned
+            wal_clear(CHECKPOINTS_DIR, window_key)
+            self._wal_seq.pop(window_key, None)
+            self._wal_owned.discard(window_key)
             return
         async with self._get_lock(window_key):
             t_file = await self.load(window_key)
@@ -526,6 +705,10 @@ class TFileManager:
                 t_file, pending, window_key=window_key, assign_numbers=True
             )
             await self.save(window_key, t_file)
+        # F1.4：T 文件落盘成功后才清 WAL（顺序关键：先 save 再清，崩在中间下次仍 replay）
+        wal_clear(CHECKPOINTS_DIR, window_key)
+        self._wal_seq.pop(window_key, None)
+        self._wal_owned.discard(window_key)
 
     def _get_lock(self, window_key: str) -> asyncio.Lock:
         """获取 per-window 的 asyncio.Lock"""
@@ -542,11 +725,11 @@ class TFileManager:
     # 读/写
     # ========================
 
-    async def load(self, window_key: str) -> dict:
-        """加载 T 文件。不存在则创建空文件。
+    async def _load_t_file_raw(self, window_key: str) -> dict:
+        """读盘 + v1→v2 迁移 + 损坏兜底，返回纯 T 文件（**不 merge buffer、不触发恢复**）。
 
-        如果文件损坏（JSON 解析失败），回退到空 T 并记录 error。
-        返回数据已包含内存缓冲区中的未刷盘消息。
+        是 load() 与崩溃恢复（_recover_window_if_needed）共用的底层读入口，
+        本身不调用 self.load，避免恢复 ↔ load 递归。
         """
         fp = self._file_path(window_key)
 
@@ -554,7 +737,7 @@ class TFileManager:
             t_file = _create_empty_t_file(window_key)
             await self.save(window_key, t_file)
             logger.info(f"[T-FILE] 创建新 T 文件: {fp}")
-            return self._merge_buffer(window_key, t_file)
+            return t_file
 
         try:
             with open(fp, "r", encoding="utf-8") as f:
@@ -574,7 +757,7 @@ class TFileManager:
                 data["version"] = 2
                 await self.save(window_key, data)
 
-            return self._merge_buffer(window_key, data)
+            return data
 
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.error(f"[T-FILE] 文件损坏 {fp}: {e}")
@@ -588,7 +771,160 @@ class TFileManager:
                 logger.warning(f"[T-FILE] 无法保留损坏文件: {rename_err}")
             t_file = _create_empty_t_file(window_key)
             await self.save(window_key, t_file)
-            return self._merge_buffer(window_key, t_file)
+            return t_file
+
+    async def load(self, window_key: str) -> dict:
+        """加载 T 文件。不存在则创建空文件。
+
+        如果文件损坏（JSON 解析失败），回退到空 T 并记录 error。
+        返回数据已包含内存缓冲区中的未刷盘消息。
+
+        S3 F2.2：首次访问某窗口时按需触发崩溃恢复（replay WAL / gen 校验 / 自愈），
+        恢复每窗口仅做一次（_recovered 集合去重），后续 load 走快路径。
+        """
+        # F2.2 按需崩溃恢复（每窗口首次 load 触发一次，内部已防重入）
+        await self._recover_window_if_needed(window_key)
+
+        data = await self._load_t_file_raw(window_key)
+        return self._merge_buffer(window_key, data)
+
+    async def _recover_window_if_needed(self, window_key: str) -> None:
+        """S3 F2.2：某窗口首次访问时按需崩溃恢复（每窗口仅一次）。
+
+        触发点决策 = (b) 按需恢复：老板娘多窗口，启动全扫慢；在窗口首次被
+        load 访问时恢复该窗口最划算。唯一的全局动作（.tmp GC）已在 __init__
+        启动期做过一次。
+
+        恢复流程（设计 §3 F2.2）：
+          (1) tmp GC —— 已在 __init__ 启动期全扫，此处不重复
+          (2) replay {window}.buffer.wal.jsonl：读每行，按 message_id 与 T 文件已有
+              消息去重，未落盘的经 _append_messages_inner 取号 append，成功后删 WAL
+          (3) load T 文件 + state.json（由 _load_t_file_raw / load_state 完成）
+          (4) generation 交叉校验：T 文件 metadata.generation vs state.generation，
+              取大者修正小者（防两次独立写盘崩在中间导致的不一致）
+          (5) 跑一次 _repair_tool_call_pairs 对 T 文件 messages 自愈（dangling 落盘修复）
+
+        算法约束：不重算划轮（沿用 state）；round_id 全局单调绝不复用（崩后宁跳号
+        不重号——号源 metadata.next_round_id 持久化在 T 文件，replay 续号即跳号不重号）；
+        state.partial=open 且末尾已 assistant → 保持（待下次 user 闭合，不强制改写）。
+        """
+        if window_key in self._recovered:
+            return
+        # 用恢复专用锁（绝不用业务 _get_lock，否则与持业务锁的 load 调用方死锁）。
+        rlock = self._recover_locks.get(window_key)
+        if rlock is None:
+            rlock = asyncio.Lock()
+            self._recover_locks[window_key] = rlock
+        async with rlock:
+            # double-check：等锁期间可能已被另一并发首次 load 恢复完
+            if window_key in self._recovered:
+                return
+            try:
+                await self._do_recover(window_key)
+            except Exception as e:  # noqa: BLE001 — 恢复失败不阻断主链路
+                logger.error(f"[T-FILE] 崩溃恢复异常 {window_key}: {e}")
+            finally:
+                # 标记已恢复（即便异常也不反复重试拖垮主链路；
+                # 残留问题留待下次进程启动 / 人工介入）
+                self._recovered.add(window_key)
+
+    async def _do_recover(self, window_key: str) -> None:
+        """实际恢复逻辑（调用方已持有 window 锁）。"""
+        wal_entries = wal_read(CHECKPOINTS_DIR, window_key)
+        wal_file = wal_file_path(CHECKPOINTS_DIR, window_key)
+        has_wal = os.path.exists(wal_file)
+
+        # 无 WAL 残留：仍需做 gen 校验 + 自愈（崩在 save 之后、清 WAL 之前不会到这；
+        # 但崩在 T 文件 save 与 state save 之间会留 gen 不一致，需校验）
+        t_file = await self._load_t_file_raw(window_key)
+        state = round_tracker.load_state(CHECKPOINTS_DIR, window_key)
+        metadata = t_file.setdefault("metadata", {})
+        _ensure_metadata_v2_fields(metadata)
+
+        dirty = False
+
+        # ---- (2) replay WAL ----
+        if wal_entries:
+            # T 文件已落盘消息的 message_id 集合（去重依据）
+            existing_ids = {
+                m.get("message_id")
+                for m in t_file.get("messages", [])
+                if isinstance(m, dict) and m.get("message_id") is not None
+            }
+            to_replay: List[dict] = []
+            for entry in wal_entries:
+                msg = entry.get("msg")
+                if not isinstance(msg, dict):
+                    continue
+                mid = msg.get("message_id")
+                # 有 message_id 且已在 T 文件 → 已落盘，跳过（去重）
+                if mid is not None and mid in existing_ids:
+                    continue
+                to_replay.append(msg)
+                if mid is not None:
+                    existing_ids.add(mid)  # 防 WAL 内部同 message_id 重复行
+
+            if to_replay:
+                # 走唯一取号入口（与正常 append 合流），续 metadata.next_round_id
+                # → round_id 跳号不重号
+                t_file = self._append_messages_inner(
+                    t_file, to_replay, window_key=window_key, assign_numbers=True
+                )
+                # _append_messages_inner 已推进 generation 并 save_state；重读 state
+                state = round_tracker.load_state(CHECKPOINTS_DIR, window_key)
+                metadata = t_file["metadata"]
+                dirty = True
+                logger.warning(
+                    f"[T-FILE] 崩溃恢复 replay WAL {window_key}: "
+                    f"{len(to_replay)}/{len(wal_entries)} 条补回（其余已落盘去重）"
+                )
+            else:
+                logger.info(
+                    f"[T-FILE] 崩溃恢复 {window_key}: WAL {len(wal_entries)} 条全部已落盘，仅清理"
+                )
+
+        # ---- (4) generation 交叉校验：取大者修正小者 ----
+        t_gen = int(metadata.get("generation", 0) or 0)
+        s_gen = int(state.get("generation", 0) or 0)
+        if t_gen != s_gen:
+            big = max(t_gen, s_gen)
+            logger.warning(
+                f"[T-FILE] generation 不一致 {window_key}: T={t_gen} state={s_gen} "
+                f"→ 取大者 {big} 修正"
+            )
+            metadata["generation"] = big
+            state["generation"] = big
+            try:
+                round_tracker.save_state(CHECKPOINTS_DIR, window_key, state)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[T-FILE] gen 校验 save_state 失败 {window_key}: {e}")
+            dirty = True
+
+        # ---- (5) 自愈：对落盘 messages 跑一次 dangling 修复 ----
+        msgs = t_file.get("messages", [])
+        if msgs:
+            placeholder = (metadata.get("dangling_tool_placeholder_template")
+                           or DANGLING_TOOL_PLACEHOLDER)
+            repaired, repairs = _repair_tool_call_pairs(msgs, placeholder)
+            if repairs:
+                # 占位消息补齐 v2 字段（_repair 产物只有 role/tool_call_id/content）
+                for m in repaired:
+                    if isinstance(m, dict):
+                        _ensure_message_v2_fields(m, legacy=False)
+                t_file["messages"] = repaired
+                metadata.setdefault("dangling_repair_history", []).extend(repairs)
+                dirty = True
+                logger.warning(
+                    f"[T-FILE] 崩溃恢复自愈 {window_key}: dangling 修复 {len(repairs)} 处"
+                )
+
+        # ---- 落盘修复结果 + 清 WAL ----
+        if dirty:
+            await self.save(window_key, t_file)
+        if has_wal:
+            # 顺序：先 save 再清 WAL（崩在中间下次仍可 replay，幂等去重）
+            wal_clear(CHECKPOINTS_DIR, window_key)
+            self._wal_seq.pop(window_key, None)
 
     def _merge_buffer(self, window_key: str, t_file: dict) -> dict:
         """将内存缓冲区中的消息合并到 T 文件数据中（纯内存，不写盘，只读视图）。
@@ -767,8 +1103,19 @@ class TFileManager:
 
         t_file["metadata"]["total_messages_ever"] += len(new_messages)
 
-        # ---- 取号后持久化 state（metadata 随 t_file save 落盘）----
+        # ---- F2.2 generation 同步推进：仅真持久化路径（取号成功）才 ++ ----
+        # T 文件 metadata.generation 与 state.generation 始终保持相等并同步前进，
+        # 二者写盘是两次独立 I/O，崩在中间会出现不一致 → 恢复时取大者修正小者。
+        # 取号前先以「两边较大者」为基准，消除历史不一致，再 +1。
         if state is not None and window_key:
+            base_gen = max(
+                int(t_file["metadata"].get("generation", 0) or 0),
+                int(state.get("generation", 0) or 0),
+            )
+            new_gen = base_gen + 1
+            t_file["metadata"]["generation"] = new_gen
+            state["generation"] = new_gen
+            # ---- 取号后持久化 state（metadata 随 t_file save 落盘）----
             try:
                 round_tracker.save_state(CHECKPOINTS_DIR, window_key, state)
             except Exception as e:

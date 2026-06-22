@@ -22,6 +22,20 @@ except Exception:
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ---- astrbot stub：checkpoint 仅用到 astrbot.api.logger。----
+# 测试进程里 stub 掉 astrbot，避免加载 quart/faiss 等重型栈（启动慢且内存峰值
+# 易 MemoryError）。正式运行时 astrbot 已真实加载，本 stub 仅作用于单测进程。
+if "astrbot" not in sys.modules:
+    import logging
+    import types
+
+    _astrbot = types.ModuleType("astrbot")
+    _astrbot_api = types.ModuleType("astrbot.api")
+    _astrbot_api.logger = logging.getLogger("flashlite_test")
+    _astrbot.api = _astrbot_api
+    sys.modules["astrbot"] = _astrbot
+    sys.modules["astrbot.api"] = _astrbot_api
+
 import pytest  # noqa: E402
 
 import checkpoint  # noqa: E402
@@ -300,9 +314,9 @@ def test_v2_fields_complete(tmp_ckpt):
 
 
 def test_metadata_defaults_const_complete():
-    """metadata v2 默认常量包含约定的全部新键。"""
+    """metadata v2 默认常量包含约定的全部新键（含 S3 批3a F2.2 新增 generation）。"""
     assert set(_METADATA_V2_DEFAULTS) == {
-        "next_round_id", "next_step_id",
+        "next_round_id", "next_step_id", "generation",
         "record_state", "bpc_state", "concurrency_state",
     }
 
