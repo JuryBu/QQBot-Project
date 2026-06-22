@@ -540,6 +540,62 @@ def gc_orphan_tmp_files(checkpoints_dir: str) -> int:
     return removed
 
 
+def _is_round_boundary(messages: List[dict], idx: int) -> bool:
+    """下标 idx 处是否为 round 边界（idx 之前/之后切开不切碎任何一轮）。
+
+    边界定义：idx==0 或 idx==len（两端天然是边界）；否则 messages[idx] 与
+    messages[idx-1] 的 round_id 不同（含「一个 None 一个非 None」的切换）即为边界。
+    同一轮内部（前后 round_id 相等且非 None）则非边界。
+    """
+    n = len(messages)
+    if idx <= 0 or idx >= n:
+        return True
+    prev_rid = messages[idx - 1].get("round_id")
+    cur_rid = messages[idx].get("round_id")
+    return prev_rid != cur_rid
+
+
+def _align_compress_count_to_round_boundary(
+    messages: List[dict], idx: int
+) -> int:
+    """S3 F1.6：把压缩切分下标 idx 对齐到最近的完整 round 边界（绝不切碎一轮）。
+
+    切分语义：messages[:idx] 压缩、messages[idx:] 保留。要求切分点落在 round
+    边界，使被压缩段与保留段各自的轮都完整（不会把某轮 first_reply 切到该轮中间）。
+
+    对齐策略：**向前挪**（缩小压缩段）——若 idx 落在某轮中间，退到该轮起始下标，
+    把整轮留给保留段。宁可少压一轮，绝不把半轮压进摘要。
+
+    legacy / 边界安全（始终落在 round 边界，绝不切碎一轮）：
+      - idx 已在边界 → 原样返回。
+      - idx 前一条 round_id 为 None（legacy 旧迁移消息，无 round 信息）→ 不挪，
+        返回原 idx，交由调用方的旧 user-assistant 防切补丁兜底（不报错）。
+      - 向前挪会退到 0（idx 落在第一轮内部，前方无完整轮可压）→ 改为**向后挪**到
+        本轮结束边界：压缩段 = 完整第一轮（仍不切碎、且非空），避免「压缩段为空
+        导致 token 永降不下来」。
+    """
+    n = len(messages)
+    if idx <= 0 or idx >= n:
+        return idx
+    # 已在 round 边界，无需对齐
+    if _is_round_boundary(messages, idx):
+        return idx
+    # idx 落在某轮内部：若该位置前一条无 round 信息（legacy），不挪交给旧补丁
+    if messages[idx - 1].get("round_id") is None:
+        return idx
+    # 向前退到本轮起始（第一个边界），整轮归入保留段
+    aligned = idx
+    while aligned > 0 and not _is_round_boundary(messages, aligned):
+        aligned -= 1
+    if aligned > 0:
+        return aligned
+    # 退到 0（落在第一轮内部）：向后挪到本轮结束边界，压缩完整第一轮（不切碎、非空）
+    fwd = idx
+    while fwd < n and not _is_round_boundary(messages, fwd):
+        fwd += 1
+    return fwd
+
+
 def serialize_messages_for_compress(messages: List[dict]) -> str:
     """将 OpenAI 格式消息列表序列化为压缩 prompt 用的文本"""
     lines = []
@@ -613,8 +669,11 @@ class TFileManager:
     def __init__(self):
         # Per-window 互斥锁
         self._locks: Dict[str, asyncio.Lock] = {}
-        # Per-window 压缩互斥标记（防止同一窗口并发压缩）
-        self._compressing: set = set()
+        # S3 F1.8: per-window 压缩锁 dict（防止同一窗口并发压缩；不同窗口压缩并行）。
+        # 替代旧 self._compressing: set（全窗口共享语义 → S5 多人并发瓶颈）。
+        # 完全参照 self._recover_locks 模式（惰性建锁取锁）。同窗口压缩仍串行
+        # （locked() 检测命中即跳过，保持旧「跳过不阻塞」语义），不同窗口各持各锁并行。
+        self._compress_locks: Dict[str, asyncio.Lock] = {}
         # Per-window 内存消息缓冲区（减少高频 I/O）
         self._msg_buffer: Dict[str, List[dict]] = {}
         # S3 F1.4: per-window WAL 临时键序号（message_id 缺失时兜底去重用，单调递增）
@@ -715,6 +774,16 @@ class TFileManager:
         if window_key not in self._locks:
             self._locks[window_key] = asyncio.Lock()
         return self._locks[window_key]
+
+    def _get_compress_lock(self, window_key: str) -> asyncio.Lock:
+        """S3 F1.8: 获取 per-window 压缩锁（惰性建锁，参照 _recover_locks 模式）。
+
+        与业务 _get_lock 分离：压缩是长耗时操作（含 flash_lite 网络调用），
+        独立锁让「同窗口压缩互斥」与「同窗口读写 T 文件」解耦，且不同窗口压缩并行。
+        """
+        if window_key not in self._compress_locks:
+            self._compress_locks[window_key] = asyncio.Lock()
+        return self._compress_locks[window_key]
 
     def _file_path(self, window_key: str) -> str:
         """计算 T 文件路径"""
@@ -957,6 +1026,10 @@ class TFileManager:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(t_file, f, ensure_ascii=False, indent=2)
+                    # S3 F1.7(a): flush + fsync 强制落盘，再 rename，
+                    # 防「rename 已生效但内容仍在 OS page cache 未落盘」时断电丢数据。
+                    f.flush()
+                    os.fsync(f.fileno())
 
                 # 原子重命名（Windows 上需要先删除目标）
                 if os.path.exists(fp):
@@ -1334,16 +1407,19 @@ class TFileManager:
             except ValueError:
                 pass  # 时间解析失败，忽略冷却期
 
-        # ④ 压缩互斥检查：同一窗口不允许并发压缩
-        if window_key in self._compressing:
+        # ④ 压缩互斥检查：同一窗口不允许并发压缩（S3 F1.8：per-window 锁取代全局 set）
+        compress_lock = self._get_compress_lock(window_key)
+        if compress_lock.locked():
             logger.info(
                 f"[CHECKPOINT] {window_key}: 另一个压缩正在进行中，跳过"
             )
             return t_file, None
 
-        # 三重守卫 + 互斥检查全部通过，标记并执行压缩
-        self._compressing.add(window_key)
-        try:  # M-1: finally 保证清除互斥标记
+        # 三重守卫 + 互斥检查全部通过，取锁并执行压缩。
+        # 用非阻塞 acquire 风格：locked() 已判过，此处必然立即获得（同窗口压缩串行；
+        # 极端并发下若被抢先取走，acquire 会等待——但 locked() 检测已大幅收窄该窗口）。
+        await compress_lock.acquire()
+        try:  # M-1: finally 保证释放压缩锁
             logger.info(
                 f"[CHECKPOINT] 触发压缩: {window_key}, "
                 f"总 token {total_tokens} > {token_limit}, "
@@ -1368,7 +1444,8 @@ class TFileManager:
 
             original_compress_count = max(1, int(available_for_compress * compress_front_ratio))
 
-            # 语义完整性：确保不切开 user-assistant 对话对
+            # 语义完整性（legacy 兜底）：确保不切开 user-assistant 对话对。
+            # round_id=None 的旧迁移消息无 round 信息，靠这条原 user/assistant 补丁防切。
             # 如果分割点正好在 user 消息后（下一条是 assistant 回复），多包含 1 条
             _split_idx = t1_count_in_candidate + original_compress_count
             if _split_idx < len(candidate):
@@ -1377,6 +1454,22 @@ class TFileManager:
                     prev_msg = candidate[_split_idx - 1] if _split_idx > 0 else None
                     if prev_msg and prev_msg.get("role") == "user":
                         original_compress_count += 1
+
+            # S3 F1.6：在 user-assistant 防切（legacy 兜底）之上叠加 round 边界对齐。
+            # original_compress_count 是对 t_file["messages"] 的切分下标（见下方
+            # remaining_messages = messages[original_compress_count:]）。对齐后切分点
+            # 落在完整 round 边界——绝不把某轮 first_reply 切到该轮中间。
+            # 同轮的 user+assistant+tool 共享 round_id，对齐天然也保证 tool 对完整。
+            raw_messages = t_file.get("messages", [])
+            aligned_count = _align_compress_count_to_round_boundary(
+                raw_messages, original_compress_count
+            )
+            if aligned_count != original_compress_count:
+                logger.info(
+                    f"[CHECKPOINT] {window_key}: F1.6 round 边界对齐切分 "
+                    f"{original_compress_count} → {aligned_count}"
+                )
+                original_compress_count = aligned_count
 
             # 总 compress_count = T1 消息对 + 原始消息压缩数
             compress_count = t1_count_in_candidate + original_compress_count
@@ -1452,6 +1545,15 @@ class TFileManager:
             # 记录压缩前快照的消息总数（用于 Save 时合并中间到达的消息）
             pre_compress_msg_count = len(t_file["messages"])
 
+            # S3 F1.6：算被压缩段最后一轮 round_id（用于更新 record_state）。
+            # 倒扫被压缩段找最后一条非 None round_id（legacy 消息 round_id=None 跳过）。
+            compressed_last_round_id = None
+            for _m in reversed(t_file["messages"][:original_compress_count]):
+                _rid = _m.get("round_id")
+                if _rid is not None:
+                    compressed_last_round_id = _rid
+                    break
+
             now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
             # 更新 T 文件
@@ -1479,6 +1581,15 @@ class TFileManager:
             t_file["metadata"]["total_compressions"] = (
                 t_file["metadata"].get("total_compressions", 0) + 1
             )
+
+            # S3 F1.6：更新 record_state.last_compressed_round_id = 已压缩的最后一轮。
+            # 一致性合约（设计 §F2.1）：单调不减，绝不回退（崩溃恢复时 record 进度可信）。
+            # round_id 形如 r000123，零填充字典序==数值序，可安全字符串比较取 max。
+            if compressed_last_round_id is not None:
+                rec_state = t_file["metadata"].setdefault("record_state", {})
+                prev_lcr = rec_state.get("last_compressed_round_id")
+                if prev_lcr is None or compressed_last_round_id > prev_lcr:
+                    rec_state["last_compressed_round_id"] = compressed_last_round_id
 
             # 更新平均压缩率
             all_ratios = [h["ratio"] for h in compress_history if "ratio" in h]
@@ -1526,8 +1637,8 @@ class TFileManager:
                 await self.save(window_key, t_file)
 
         finally:
-            # M-1: 无论成功/失败/异常，始终清除互斥标记
-            self._compressing.discard(window_key)
+            # M-1: 无论成功/失败/异常，始终释放压缩锁（S3 F1.8）
+            compress_lock.release()
 
         # 保存到 checkpoint_history 表（供面板统计）
         await self._save_to_db(
