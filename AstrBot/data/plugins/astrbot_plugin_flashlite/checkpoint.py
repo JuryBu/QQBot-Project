@@ -1621,12 +1621,24 @@ class TFileManager:
                 # 合并：压缩后保留部分 + 中间到达的消息
                 t_file["messages"] = remaining_messages + mid_arrival_msgs
 
-                # 同步 metadata：取 max 防止统计回退
+                # 同步 metadata：取 max 防止统计/号源回退
                 cur_meta = current_t_file.get("metadata", {})
                 t_file["metadata"]["total_messages_ever"] = max(
                     t_file["metadata"].get("total_messages_ever", 0),
                     cur_meta.get("total_messages_ever", 0),
                 )
+                # S3 批3.5-A(critical, compress-clobbers-numbersource): 号源/世代「只进不退」。
+                # 压缩期间并发 append 经唯一取号入口推进了【磁盘】metadata 的
+                # next_round_id/next_step_id/generation（mid_arrival 消息已带这些新号），
+                # 但本次 save 的 t_file 是压缩前【快照】(旧号源)。若用快照整份覆盖磁盘 →
+                # 号源回退 → 下次 append 重发已用过的 round_id/step_id（违反全局单调铁律，
+                # 且号源只存 T 文件 metadata、无 state 备份、_do_recover 不校验，不可自愈）。
+                # 故这三者与 total_messages_ever 一样从 cur_meta(磁盘最新)取 max。
+                for _ns_key in ("next_round_id", "next_step_id", "generation"):
+                    t_file["metadata"][_ns_key] = max(
+                        int(t_file["metadata"].get(_ns_key, 0) or 0),
+                        int(cur_meta.get(_ns_key, 0) or 0),
+                    )
 
                 if mid_arrival_msgs:
                     logger.info(
