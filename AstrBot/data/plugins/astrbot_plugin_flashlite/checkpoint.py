@@ -1516,42 +1516,48 @@ class TFileManager:
     # 构建 LLM Contexts
     # ========================
 
-    def build_llm_contexts(self, t_file: dict) -> List[dict]:
-        """从 T 文件构建 OpenAI 格式 contexts（发送给主模型）
+    def build_llm_contexts(
+        self, t_file: dict, window_key: Optional[str] = None
+    ) -> List[dict]:
+        """从 T 文件构建 OpenAI 格式 contexts（发送给主模型）。
 
-        返回格式：[T1_user, T1_ack, msg1, msg2, ...]
+        两种后端（S4 R3 / D7）：
+          - **record 视图**（window_key 提供 + record 可用）：已聚合 round-group 读
+            record 概要块（本批全 full 档，分级留批3），末尾未聚合轮取 messages 原文。
+            形如 [record 概要块(已聚合) + 末尾原文(未聚合)]。
+          - **全量视图**（window_key=None 或 record 空/坏，fallback）：现状 T1 摘要
+            + messages 全量原文，形如 [T1_user, T1_ack, msg1, msg2, ...]。
+
+        ⚠️ **高危注入主路径**：context_mixin 注入端传 window_key 切 record 视图；
+        checkpoint 内部触发判定 / 接力中止判定（compose_record_if_needed）**不传**
+        window_key，维持全量视图旧行为（token 口径不变，不破坏接力判据）。
+
+        **fallback 铁律（D1）**：record 路径任一环节异常 / round_groups 为空 / 文本读
+        不出 → 静默回退全量视图，端到端绝不崩。record.md 是派生物，真理源是
+        metadata.record_state（round_groups 直接带各组 tier 文本），故读取本身不依赖
+        record.md 文件；window_key 提供时顺带 rebuild_index_if_stale 保 sidecar 同步
+        （坏了重渲），但重渲失败也不影响主路径。
+
+        dangling tool_calls 修复（S3 F1.5 读侧 last-mile）在两条路径汇合后无条件执行。
         """
-        contexts = []
+        contexts = None
 
-        # 1. T1：压缩历史摘要
-        t1 = t_file.get("T1", {})
-        summary = t1.get("compressed_summary", "")
-        if summary:
-            contexts.append({
-                "role": "user",
-                "content": f"{T1_SUMMARY_PREFIX}\n{summary}",
-            })
-            contexts.append({
-                "role": "assistant",
-                "content": T1_ACK_CONTENT,
-            })
+        # ---- record 视图（仅注入主路径传 window_key 时尝试）----
+        if window_key:
+            try:
+                contexts = self._build_contexts_from_record(t_file, window_key)
+            except Exception as e:  # noqa: BLE001 — 注入主路径，任何异常都不许崩
+                logger.warning(
+                    f"[T-FILE] build_llm_contexts: record 视图构建异常 "
+                    f"{window_key}: {e} → fallback 全量"
+                )
+                contexts = None
 
-        # 2. 原文消息
-        for msg in t_file.get("messages", []):
-            ctx_msg = {"role": msg["role"]}
+        # ---- fallback / 默认：全量视图（T1 + messages 全量）----
+        if contexts is None:
+            contexts = self._build_contexts_full(t_file)
 
-            if msg.get("content") is not None:
-                ctx_msg["content"] = msg["content"]
-
-            if msg.get("tool_calls"):
-                ctx_msg["tool_calls"] = msg["tool_calls"]
-
-            if msg.get("tool_call_id"):
-                ctx_msg["tool_call_id"] = msg["tool_call_id"]
-
-            contexts.append(ctx_msg)
-
-        # S3 F1.5: 读侧 last-mile dangling tool_calls 防御（C1 critical）
+        # ---- S3 F1.5: 读侧 last-mile dangling tool_calls 防御（C1 critical）----
         # 输出前无条件修复未配对的 tool_calls / tool 结果，防止 provider 400。
         placeholder = DANGLING_TOOL_PLACEHOLDER
         try:
@@ -1574,6 +1580,159 @@ class TFileManager:
                 logger.debug(f"[T-FILE] dangling_repair_history 记录失败: {_re}")
 
         return contexts
+
+    # --- 全量视图（fallback / 内部触发判定用，行为同 S3 旧 build_llm_contexts）---
+    def _build_contexts_full(self, t_file: dict) -> List[dict]:
+        """现状全量：T1 压缩摘要（user+assistant ACK 两条）+ messages 全量原文。
+
+        record 不可用时的 fallback，也是 checkpoint 内部触发/接力判定的固定口径
+        （token 不被 record 概要缩减 → 不破坏接力中止判据）。dangling 修复由调用方
+        build_llm_contexts 统一收尾，此处只产原始序列。
+        """
+        contexts: List[dict] = []
+
+        # 1. T1：压缩历史摘要
+        t1 = t_file.get("T1", {}) or {}
+        summary = t1.get("compressed_summary", "")
+        if summary:
+            contexts.append({
+                "role": "user",
+                "content": f"{T1_SUMMARY_PREFIX}\n{summary}",
+            })
+            contexts.append({
+                "role": "assistant",
+                "content": T1_ACK_CONTENT,
+            })
+
+        # 2. 原文消息
+        for msg in t_file.get("messages", []):
+            if not isinstance(msg, dict) or "role" not in msg:
+                continue
+            ctx_msg = {"role": msg["role"]}
+            if msg.get("content") is not None:
+                ctx_msg["content"] = msg["content"]
+            if msg.get("tool_calls"):
+                ctx_msg["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_call_id"):
+                ctx_msg["tool_call_id"] = msg["tool_call_id"]
+            contexts.append(ctx_msg)
+
+        return contexts
+
+    # --- record 视图（S4 R3 / D7）：已聚合读 record 概要块 + 末尾未聚合原文 ---
+    def _build_contexts_from_record(
+        self, t_file: dict, window_key: str
+    ) -> Optional[List[dict]]:
+        """从 record 构建注入上下文：[已聚合 record 概要块] + [末尾未聚合原文]。
+
+        返回 None 表示 record 不可用（round_groups 为空 / 无有效聚合组），由调用方
+        fallback 全量。返回非 None（含空 list 上层会补 dangling 修复）表示走 record 视图。
+
+        实现要点（D1：metadata 真理源，record.md 派生物）：
+          - 已聚合组文本直接取自 record_state.round_groups 各组的 tier 文本
+            （full_text/summary_text/...，render_record_md 同源），**不依赖 record.md
+            文件 I/O**——record.md 坏了也读得出，根治「派生物坏 → 注入断」。
+          - 末尾未聚合原文 = messages 里 round_id 数值 > 已聚合水位
+            （max round_range[1]）的原始 message（保留 role/content/tool_calls/
+            tool_call_id 结构，dangling 修复才有效）。legacy 占位 [0,0] 时水位=0，
+            真轮 r1+ 全部作末尾原文（legacy 概要 + 全部真轮，不丢轮）。
+          - 顺带 rebuild_index_if_stale 保 sidecar 与 record.md 同步（D1/D2，best-effort，
+            失败仅 warning 不影响注入）。
+        """
+        meta = t_file.get("metadata", {}) or {}
+        rec_state = meta.get("record_state", {}) or {}
+        round_groups = rec_state.get("round_groups") or []
+
+        # 有效聚合组：dict 且 round_range 可解析。无 → record 不可用，fallback。
+        valid_groups = [
+            g for g in round_groups
+            if isinstance(g, dict) and self._rg_round_end(g) is not None
+        ]
+        if not valid_groups:
+            return None
+
+        # 已聚合水位：所有组 round_range 终点的最大值（含 legacy 占位 0）。
+        watermark = _max_grouped_round_end(valid_groups)
+        if watermark is None:
+            return None
+
+        contexts: List[dict] = []
+
+        # ---- (a) 已聚合 round-group：读各组 tier 概要文本拼成 record 概要块 ----
+        # 本批分级简单：所有组按各自 tier 读（legacy=summary，新组=full），分级定档
+        # 公式留批3 D7。概要块以 user/assistant ACK 对注入（沿用 T1 注入契约，主模型
+        # 理解为「历史记录摘要」）。
+        block_parts: List[str] = []
+        for g in valid_groups:
+            tier = g.get("tier") or record.TIER_FULL
+            body = record._select_tier_body(g, tier)
+            if not body:
+                continue
+            rr = g.get("round_range") or [None, None]
+            title = g.get("title") or ""
+            head = f"[{g.get('rg_id', '?')} 轮次{rr[0]}-{rr[1]}]"
+            if title:
+                head += f" {title}"
+            block_parts.append(f"{head}\n{body}")
+
+        if block_parts:
+            record_text = "\n\n".join(block_parts)
+            contexts.append({
+                "role": "user",
+                "content": f"{T1_SUMMARY_PREFIX}\n{record_text}",
+            })
+            contexts.append({
+                "role": "assistant",
+                "content": T1_ACK_CONTENT,
+            })
+
+        # ---- (b) 末尾未聚合原文：round_id 数值 > 水位的原始 message ----
+        # 保留原 message 结构（含 tool_calls / tool_call_id），dangling 修复才生效。
+        # legacy 无号消息（parse=-1）：水位 > -1 时不收（已被 legacy 概要覆盖）。
+        for msg in t_file.get("messages", []):
+            if not isinstance(msg, dict) or "role" not in msg:
+                continue
+            rn = round_tracker.parse_round_id(msg.get("round_id"))
+            if rn <= watermark:
+                continue  # 已聚合区间内（或无号），由概要块覆盖
+            ctx_msg = {"role": msg["role"]}
+            if msg.get("content") is not None:
+                ctx_msg["content"] = msg["content"]
+            if msg.get("tool_calls"):
+                ctx_msg["tool_calls"] = msg["tool_calls"]
+            if msg.get("tool_call_id"):
+                ctx_msg["tool_call_id"] = msg["tool_call_id"]
+            contexts.append(ctx_msg)
+
+        # ---- (c) sidecar 同步（D1/D2 best-effort，失败不影响注入）----
+        try:
+            generation = int(meta.get("generation", 0) or 0)
+            record.rebuild_index_if_stale(
+                CHECKPOINTS_DIR, window_key, rec_state,
+                generation=generation, logger=logger,
+            )
+        except Exception as _se:  # noqa: BLE001
+            logger.debug(
+                f"[T-FILE] {window_key}: rebuild_index_if_stale best-effort 失败 {_se}"
+            )
+
+        return contexts
+
+    @staticmethod
+    def _rg_round_end(group: dict) -> Optional[int]:
+        """取单个 round-group 的 round_range 终点（数值）；不可解析返回 None。"""
+        rr = group.get("round_range")
+        if not isinstance(rr, (list, tuple)) or len(rr) < 2:
+            return None
+        e = rr[1]
+        if isinstance(e, bool):
+            return None
+        if isinstance(e, int):
+            return e
+        if isinstance(e, str):
+            n = round_tracker.parse_round_id(e)
+            return n if n >= 0 else None
+        return None
 
     # ========================
     # 构建 FlashLite 上下文

@@ -726,8 +726,14 @@ class ContextMixin:
                         logger.info(f"[CHECKPOINT] {window_key}: 压缩完成 {compress_result}")
 
                     # 核心：替换 req.contexts 为 T 文件构建的上下文
+                    # S4 R3(D7)：注入主路径传 window_key → 切 record 视图（已聚合读
+                    # record 概要块 + 末尾未聚合原文）；record 空/坏 build_llm_contexts
+                    # 内部自动 fallback 全量原文，端到端不崩。checkpoint 内部触发/接力
+                    # 判定不传 window_key，维持全量 token 口径。
                     _original_contexts = req.contexts  # 保存原始引用（用于 assistant 补录）
-                    req.contexts = self._t_file_mgr.build_llm_contexts(t_file)
+                    req.contexts = self._t_file_mgr.build_llm_contexts(
+                        t_file, window_key=window_key
+                    )
                     t_file_active = True
                     logger.info(f"[T-FILE] {window_key}: req.contexts 已替换为 T 文件内容 ({len(req.contexts)} 条)")
 
