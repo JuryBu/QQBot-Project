@@ -165,5 +165,81 @@
         "type": "string",
         "hint": "动态模型名子键，必须 JSON 字符串打包（不可 object 展开，否则被框架递归删）。格式: {\"模型名\":{\"input\":0.1,\"output\":0.4}}。运行时 json.loads 解析",
         "default": "{}"
+    },
+    "round_max_steps": {
+        "description": "S3 划轮：单轮最大 step 数（超过强制闭合当前轮，防单轮无限膨胀）",
+        "type": "int",
+        "hint": "建议 20-40。ReAct 工具链不会被中途拆轮（step 完整才闭合）",
+        "default": 30,
+        "minimum": 5
+    },
+    "round_max_tokens": {
+        "description": "S3 划轮：单轮最大 token 数（超过强制闭合当前轮）",
+        "type": "int",
+        "hint": "建议 4000-12000。与 round_max_steps 任一触发即闭合",
+        "default": 8000,
+        "minimum": 1000
+    },
+    "round_idle_close_s": {
+        "description": "S3 划轮：轮空闲自动闭合秒数（群聊低活时段无新消息也无回复时兜底闭合）",
+        "type": "int",
+        "hint": "建议 300-1200。防 first_reply 永不到来导致划轮卡死",
+        "default": 600,
+        "minimum": 60
+    },
+    "keep_recent_rounds": {
+        "description": "S3/S4：压缩时保留最近 N 轮原文（按轮而非按条）",
+        "type": "int",
+        "hint": "建议 10-20",
+        "default": 15,
+        "minimum": 1
+    },
+    "dangling_tool_placeholder_template": {
+        "description": "S3：工具调用结果丢失（崩溃/中断）时的占位文案，保持 round/step 完整性",
+        "type": "string",
+        "hint": "dangling tool_calls 补占位用，须与 checkpoint 常量一致",
+        "default": "[工具结果丢失：系统重启/中断]"
+    },
+    "rg_target_rounds": {
+        "description": "S4 record：round-group 聚合的目标轮数（每组聚合多少轮）",
+        "type": "int",
+        "hint": "S4 消费，S3 先占位防框架 check_config_integrity 删键。建议 5-12",
+        "default": 8,
+        "minimum": 1
+    },
+    "compress_delta_tokens": {
+        "description": "S5 BPC：增量压缩触发的 token 增量阈值（距上次压缩新增超此值触发）",
+        "type": "int",
+        "hint": "S5 消费，S3 先占位",
+        "default": 800,
+        "minimum": 100
+    },
+    "tier_summary_age": {
+        "description": "S4 record 分级：记录降级为 summary 的轮龄阈值",
+        "type": "int",
+        "hint": "S4 消费，S3 先占位。超过此轮龄的 record 降为 summary 级",
+        "default": 20,
+        "minimum": 1
+    },
+    "tier_brief_age": {
+        "description": "S4 record 分级：记录降级为 brief 的轮龄阈值（比 summary 更简）",
+        "type": "int",
+        "hint": "S4 消费，S3 先占位",
+        "default": 60,
+        "minimum": 1
+    },
+    "tier_hysteresis": {
+        "description": "S4 record 分级：降级滞后轮数（防边界抖动反复升降级）",
+        "type": "int",
+        "hint": "S4 消费，S3 先占位",
+        "default": 5,
+        "minimum": 0
+    },
+    "hit_halflife": {
+        "description": "S7 hit 召回：命中热度半衰期（轮数，hit 标记热度按此半衰期衰减）",
+        "type": "int",
+        "hint": "S7 消费，S3 先占位",
+        "default": 30,
+        "minimum": 1
     }
 }
