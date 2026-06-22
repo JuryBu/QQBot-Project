@@ -196,6 +196,16 @@ def serialize_messages_for_compress(messages: List[dict]) -> str:
         content = msg.get("content", "")
         ts = msg.get("timestamp", "")
 
+        # 多模态分段 list → 拼接 text part, 图片/媒体段丢弃占位; None → ""
+        # 不归一化的话 L205 `list + " "` 会抛 TypeError，整个 T-FILE 压缩静默熄火
+        if isinstance(content, list):
+            content = " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        elif content is None:
+            content = ""
+
         # 处理 tool_calls
         if msg.get("tool_calls"):
             tool_descs = []
