@@ -236,10 +236,35 @@
         "minimum": 0
     },
     "hit_halflife": {
-        "description": "S7 hit 召回：命中热度半衰期（轮数，hit 标记热度按此半衰期衰减）",
+        "description": "S4/S7 hit 召回：命中热度半衰期（秒，hit 热度按时间衰减 0.5^(Δt/halflife)）",
         "type": "int",
-        "hint": "S7 消费，S3 先占位",
-        "default": 30,
+        "hint": "D9 改时间秒口径（非轮数，贴合『记忆随时间淡』）。默认 86400=1天。S4 批3 tier_for_group 消费",
+        "default": 86400,
+        "minimum": 1
+    },
+    "hit_upgrade_threshold": {
+        "description": "S4 record 分级：hit_score 超此值才在 base 档抬一档（D7 命中升档阈值）",
+        "type": "float",
+        "hint": "D7 台阶+偏移。hit_score=Σ hit_count×weight×0.5^(Δt/halflife)，超此值抬一档封顶 full。批3 hit_table 空时恒不触发（纯 age 兜底）",
+        "default": 1.0
+    },
+    "hit_weight_raw": {
+        "description": "S4 record 分级：原文召回命中权重（D7，主动检索原文，强信号）",
+        "type": "float",
+        "hint": "D7 hit_score 权重。原文召回 > record 被动读",
+        "default": 1.0
+    },
+    "hit_weight_record": {
+        "description": "S4 record 分级：record 被动读命中权重（D7，弱于原文召回）",
+        "type": "float",
+        "hint": "D7 hit_score 权重。record 已在上下文被动读，信号弱于主动召回原文",
+        "default": 0.5
+    },
+    "hit_keep_rounds": {
+        "description": "S4 record：命中即锁定保持轮数（D10，替代双阈值滞回，命中后留高档 N 轮）",
+        "type": "int",
+        "hint": "D10 命中即锁定。批3 先占位，批4 hit 子系统消费",
+        "default": 3,
         "minimum": 1
     },
     "rg_force_seal_rounds": {

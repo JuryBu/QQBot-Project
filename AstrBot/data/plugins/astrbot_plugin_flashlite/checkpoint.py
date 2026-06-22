@@ -1517,14 +1517,17 @@ class TFileManager:
     # ========================
 
     def build_llm_contexts(
-        self, t_file: dict, window_key: Optional[str] = None
+        self, t_file: dict, window_key: Optional[str] = None,
+        record_cfg: Optional[dict] = None,
     ) -> List[dict]:
         """从 T 文件构建 OpenAI 格式 contexts（发送给主模型）。
 
         两种后端（S4 R3 / D7）：
-          - **record 视图**（window_key 提供 + record 可用）：已聚合 round-group 读
-            record 概要块（本批全 full 档，分级留批3），末尾未聚合轮取 messages 原文。
-            形如 [record 概要块(已聚合) + 末尾原文(未聚合)]。
+          - **record 视图**（window_key 提供 + record 可用）：已聚合 round-group 按 D7
+            定档公式 tier_for_group（轮龄为主 + 命中修正 + 滞回）逐组读对应档文本
+            （full_text/summary_text/brief），末尾未聚合轮取 messages 原文。
+            形如 [record 概要块(已聚合,分级) + 末尾原文(未聚合)]。
+            record_cfg：D7 定档 / 接力配置（tier_*/hit_* ）；缺则 record 模块 DEFAULT 兜底。
           - **全量视图**（window_key=None 或 record 空/坏，fallback）：现状 T1 摘要
             + messages 全量原文，形如 [T1_user, T1_ack, msg1, msg2, ...]。
 
@@ -1545,7 +1548,9 @@ class TFileManager:
         # ---- record 视图（仅注入主路径传 window_key 时尝试）----
         if window_key:
             try:
-                contexts = self._build_contexts_from_record(t_file, window_key)
+                contexts = self._build_contexts_from_record(
+                    t_file, window_key, record_cfg=record_cfg
+                )
             except Exception as e:  # noqa: BLE001 — 注入主路径，任何异常都不许崩
                 logger.warning(
                     f"[T-FILE] build_llm_contexts: record 视图构建异常 "
@@ -1619,19 +1624,26 @@ class TFileManager:
 
         return contexts
 
-    # --- record 视图（S4 R3 / D7）：已聚合读 record 概要块 + 末尾未聚合原文 ---
+    # --- record 视图（S4 R3 / D7）：已聚合按分级定档读 + 末尾未聚合原文 ---
     def _build_contexts_from_record(
-        self, t_file: dict, window_key: str
+        self, t_file: dict, window_key: str,
+        record_cfg: Optional[dict] = None,
     ) -> Optional[List[dict]]:
-        """从 record 构建注入上下文：[已聚合 record 概要块] + [末尾未聚合原文]。
+        """从 record 构建注入上下文：[已聚合 record 概要块(分级)] + [末尾未聚合原文]。
 
         返回 None 表示 record 不可用（round_groups 为空 / 无有效聚合组），由调用方
         fallback 全量。返回非 None（含空 list 上层会补 dangling 修复）表示走 record 视图。
 
-        实现要点（D1：metadata 真理源，record.md 派生物）：
+        实现要点（D1：metadata 真理源，record.md 派生物 + D7 分级 + D8 防空洞）：
           - 已聚合组文本直接取自 record_state.round_groups 各组的 tier 文本
             （full_text/summary_text/...，render_record_md 同源），**不依赖 record.md
             文件 I/O**——record.md 坏了也读得出，根治「派生物坏 → 注入断」。
+          - **分级定档（批3 D7）**：每组实际读哪一档由 record.tier_for_group 算
+            （base=age 阶梯 + hit_score 升档 + 滞回），而非静态读组内 tier。now_round 取
+            metadata.next_round_id-1（已分配最大轮）；hit_table 取 record_state.hit_table
+            （批3 常空 → 纯 age 兜底，不报错）；record_cfg 提供 tier_*/hit_* 阈值（缺则 DEFAULT）。
+          - **D8 防空洞**：组处于「已封板、水位之后、却无 summary」空洞态时（group_has_summary_gap）
+            强制留 full，绝不降到尚未生成的 summary/brief（读空块）。
           - 末尾未聚合原文 = messages 里 round_id 数值 > 已聚合水位
             （max round_range[1]）的原始 message（保留 role/content/tool_calls/
             tool_call_id 结构，dangling 修复才有效）。legacy 占位 [0,0] 时水位=0，
@@ -1656,21 +1668,37 @@ class TFileManager:
         if watermark is None:
             return None
 
+        # 分级定档所需上下文：now_round（已分配最大轮）/ hit_table / summary 水位。
+        try:
+            now_round = int(meta.get("next_round_id", 1) or 1) - 1
+        except (TypeError, ValueError):
+            now_round = None
+        hit_table = rec_state.get("hit_table") or {}
+        summary_wm = rec_state.get("summary_watermark_rg_id")
+        import time as _time
+        now_ts = _time.time()
+
         contexts: List[dict] = []
 
-        # ---- (a) 已聚合 round-group：读各组 tier 概要文本拼成 record 概要块 ----
-        # 本批分级简单：所有组按各自 tier 读（legacy=summary，新组=full），分级定档
-        # 公式留批3 D7。概要块以 user/assistant ACK 对注入（沿用 T1 注入契约，主模型
-        # 理解为「历史记录摘要」）。
+        # ---- (a) 已聚合 round-group：按 D7 分级定档逐组读对应档文本 ----
+        # 定档 = record.tier_for_group（base age 阶梯 + hit 升档 + 滞回）；D8 空洞守护：
+        # 「已封板/水位后/无 summary」的组强制 full 防读空块。概要块以 user/assistant ACK
+        # 对注入（沿用 T1 注入契约，主模型理解为「历史记录摘要」）。
         block_parts: List[str] = []
         for g in valid_groups:
-            tier = g.get("tier") or record.TIER_FULL
+            tier = record.tier_for_group(
+                g, now_round, hit_table, record_cfg,
+                now_ts=now_ts, prev_tier=g.get("tier"),
+            )
+            # D8 防空洞：想降档到 summary/brief 但该组处于 summary 空洞 → 强制 full。
+            if tier != record.TIER_FULL and record.group_has_summary_gap(g, summary_wm):
+                tier = record.TIER_FULL
             body = record._select_tier_body(g, tier)
             if not body:
                 continue
             rr = g.get("round_range") or [None, None]
             title = g.get("title") or ""
-            head = f"[{g.get('rg_id', '?')} 轮次{rr[0]}-{rr[1]}]"
+            head = f"[{g.get('rg_id', '?')} 轮次{rr[0]}-{rr[1]} {tier}]"
             if title:
                 head += f" {title}"
             block_parts.append(f"{head}\n{body}")

@@ -712,6 +712,15 @@ class ContextMixin:
                         "rg_max_batch_tokens": self._cfg("rg_max_batch_tokens", 16000),
                         "compress_delta_floor": self._cfg("compress_delta_floor", 200),
                         "record_max_relay_rounds": self._cfg("record_max_relay_rounds", 3),
+                        # S4 批3 D7 分级定档（build_llm_contexts 读 record 概要块时定档用）。
+                        "tier_summary_age": self._cfg("tier_summary_age", 20),
+                        "tier_brief_age": self._cfg("tier_brief_age", 60),
+                        "tier_hysteresis": self._cfg("tier_hysteresis", 5),
+                        "hit_upgrade_threshold": self._cfg("hit_upgrade_threshold", 1.0),
+                        "hit_weight_raw": self._cfg("hit_weight_raw", 1.0),
+                        "hit_weight_record": self._cfg("hit_weight_record", 0.5),
+                        "hit_halflife": self._cfg("hit_halflife", 86400),
+                        "hit_keep_rounds": self._cfg("hit_keep_rounds", 3),
                     }
                     t_file, compress_result = await self._t_file_mgr.compress_if_needed(
                         window_key=window_key,
@@ -732,7 +741,7 @@ class ContextMixin:
                     # 判定不传 window_key，维持全量 token 口径。
                     _original_contexts = req.contexts  # 保存原始引用（用于 assistant 补录）
                     req.contexts = self._t_file_mgr.build_llm_contexts(
-                        t_file, window_key=window_key
+                        t_file, window_key=window_key, record_cfg=_record_cfg
                     )
                     t_file_active = True
                     logger.info(f"[T-FILE] {window_key}: req.contexts 已替换为 T 文件内容 ({len(req.contexts)} 条)")
