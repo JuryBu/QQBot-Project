@@ -540,7 +540,17 @@ class TFileManager:
     def _format_msg_for_flashlite(msg: dict) -> str:
         """将单条消息格式化为 FlashLite 可读的文本行"""
         role = msg.get("role", "unknown")
-        content = msg.get("content", "") or ""
+        content = msg.get("content", "")
+        # 同 serialize_messages_for_compress 的归一化:
+        # `or ""` 在 list (truthy) 上失效会导致 list 原样穿透到 f-string 渲染成
+        # `[{'type':'text', 'text':...}]` 字面串污染 FlashLite 触发判定 (实测 210/341 条触发)
+        if isinstance(content, list):
+            content = " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        elif content is None:
+            content = ""
         ts = msg.get("timestamp", "")
 
         # 时间简化
