@@ -1464,15 +1464,18 @@ class TFileManager:
                 return t_file, None
 
             original_compress_count = max(1, int(available_for_compress * compress_front_ratio))
+            raw_messages = t_file.get("messages", [])
 
             # 语义完整性（legacy 兜底）：确保不切开 user-assistant 对话对。
             # round_id=None 的旧迁移消息无 round 信息，靠这条原 user/assistant 补丁防切。
-            # 如果分割点正好在 user 消息后（下一条是 assistant 回复），多包含 1 条
-            _split_idx = t1_count_in_candidate + original_compress_count
-            if _split_idx < len(candidate):
-                next_msg = candidate[_split_idx]
+            # 如果分割点正好在 user 消息后（下一条是 assistant 回复），多包含 1 条。
+            # S3 批3.5-C2(C-3 candidate-raw 残留): 判定改用 raw_messages 下标，与最终切片
+            # (to_compress/remaining 均 raw 系)一致——candidate 因 _repair 插占位/删 orphan
+            # 长度漂移，用 candidate[_split_idx] 会读到错位消息致 ±1 误判。
+            if original_compress_count < len(raw_messages):
+                next_msg = raw_messages[original_compress_count]
                 if next_msg.get("role") == "assistant" and original_compress_count < available_for_compress:
-                    prev_msg = candidate[_split_idx - 1] if _split_idx > 0 else None
+                    prev_msg = raw_messages[original_compress_count - 1] if original_compress_count > 0 else None
                     if prev_msg and prev_msg.get("role") == "user":
                         original_compress_count += 1
 
@@ -1481,7 +1484,6 @@ class TFileManager:
             # remaining_messages = messages[original_compress_count:]）。对齐后切分点
             # 落在完整 round 边界——绝不把某轮 first_reply 切到该轮中间。
             # 同轮的 user+assistant+tool 共享 round_id，对齐天然也保证 tool 对完整。
-            raw_messages = t_file.get("messages", [])
             aligned_count = _align_compress_count_to_round_boundary(
                 raw_messages, original_compress_count
             )
@@ -1490,16 +1492,34 @@ class TFileManager:
             # 不回复时 round_tracker 把所有消息归同一 partial 轮)，越过
             # available_for_compress → remaining=[] → keep_recent 最近上下文被压光。
             # 夹回上限保住最近 keep_recent 条(此场景宁可切分点不在 round 边界)。
-            aligned_count = min(aligned_count, available_for_compress)
+            _clamped = min(aligned_count, available_for_compress)
+            clamp_hit = _clamped != aligned_count  # 是否真发生 overshoot 夹回
+            aligned_count = _clamped
+            # S3 批3.5-C2(C-2 orphan tool): clamp 夹回的切分点可能落在 step 中间——若
+            # remaining[0] 是 tool 结果(其配对 assistant 已被压走)，读侧
+            # _repair_tool_call_pairs 会把它当 orphan 静默删除致 tool 结果丢失。向前回退
+            # 切分点到 step 边界(remaining[0] 非 tool 且其前一条非 assistant.tool_calls)；
+            # 仅当找到有效边界(>0)才采用，否则保 clamp 值靠读侧 _repair 兜底。
+            if clamp_hit:
+                _safe = aligned_count
+                while _safe > 0:
+                    _rem0 = raw_messages[_safe] if _safe < len(raw_messages) else None
+                    _prev = raw_messages[_safe - 1]
+                    _rem0_tool = bool(_rem0) and _rem0.get("role") == "tool"
+                    _prev_tc = _prev.get("role") == "assistant" and _prev.get("tool_calls")
+                    if _rem0_tool or _prev_tc:
+                        _safe -= 1
+                    else:
+                        break
+                if _safe > 0:
+                    aligned_count = _safe
             if aligned_count != original_compress_count:
                 logger.info(
-                    f"[CHECKPOINT] {window_key}: F1.6 round 边界对齐切分 "
-                    f"{original_compress_count} → {aligned_count}"
+                    f"[CHECKPOINT] {window_key}: 压缩切分点调整 "
+                    f"{original_compress_count} → {aligned_count} "
+                    f"({'overshoot夹回+step对齐' if clamp_hit else 'F1.6 round边界对齐'})"
                 )
                 original_compress_count = aligned_count
-
-            # 总 compress_count = T1 消息对 + 原始消息压缩数
-            compress_count = t1_count_in_candidate + original_compress_count
 
             # S3 批3.5-C(candidate-raw-index-desync): to_compress 的原始消息部分从
             # raw(t_file messages)切，与 remaining_messages(下方 raw 系)同下标系。
@@ -1579,10 +1599,19 @@ class TFileManager:
 
             # S3 F1.6：算被压缩段最后一轮 round_id（用于更新 record_state）。
             # 倒扫被压缩段找最后一条非 None round_id（legacy 消息 round_id=None 跳过）。
+            # S3 批3.5-C2(C-1): 若 clamp overshoot 把某轮 rN 切成两半(尾部留在
+            # remaining)，不能把 rN 标为「已完整压缩」——否则 F2.x record 增量按
+            # last_compressed_round_id 切片会漏写 rN 残留。跳过「尾部仍在 remaining」的
+            # 被切轮，取被压缩段里最后一个【完整】压缩的轮。
+            _remaining_first_rid = (
+                remaining_messages[0].get("round_id") if remaining_messages else None
+            )
             compressed_last_round_id = None
             for _m in reversed(t_file["messages"][:original_compress_count]):
                 _rid = _m.get("round_id")
                 if _rid is not None:
+                    if _rid == _remaining_first_rid:
+                        continue  # 该轮被切，尾部在 remaining，不算完整压缩
                     compressed_last_round_id = _rid
                     break
 
