@@ -760,10 +760,25 @@ class ContextMixin:
                                     (m for m in reversed(t_msgs) if m.get("role") == "assistant"),
                                     None
                                 )
+
+                                # S3 端到端修复(fallback 重复补录): content 归一化后再比较。
+                                # T 文件里 assistant content 可能是 str(on_llm_response 钩子
+                                # 存的纯文本)或 list(多模态), 而 fallback 从 contexts 取的是
+                                # OpenAI list 格式 [{'type':'text','text':...}]。直接 == 因格式
+                                # 不一致恒为 False → 去重失效 → 同一条回复被钩子+fallback 落两次
+                                # (实测螃蟹笑话 step5/step7 重复且错位到下一轮)。
+                                def _norm_c(_c):
+                                    if isinstance(_c, list):
+                                        return " ".join(
+                                            _p.get("text", "") for _p in _c
+                                            if isinstance(_p, dict) and _p.get("type") == "text"
+                                        ).strip()
+                                    return str(_c or "").strip()
+
                                 _is_dup = (
                                     not _asst_has_tc
                                     and _last_asst_t is not None
-                                    and _last_asst_t.get("content") == _asst_content
+                                    and _norm_c(_last_asst_t.get("content")) == _norm_c(_asst_content)
                                 )
                                 if not _is_dup:
                                     # 一次性 append 整个 step（约束7 原子落盘）
