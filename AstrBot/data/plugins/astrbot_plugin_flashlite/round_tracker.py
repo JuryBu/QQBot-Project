@@ -224,14 +224,20 @@ def assign_round(
             # 但仍受双上限保护。
             over_steps = state.get("round_step_count", 0) >= round_max_steps
             over_tokens = state.get("round_token_count", 0) >= round_max_tokens
-            if over_steps or over_tokens:
+            # S3 批3.5-C(react-step-split-by-double-limit): 双上限切轮延迟到 step 边界。
+            # 本条若是 tool 结果，或带 tool_calls 的 assistant，说明正处于未完成的
+            # ReAct step(assistant.tool_calls ↔ tool 配对中)，此时切轮会把半个 step 拆
+            # 到两轮 → F1.6 round 边界对齐据此产生 dangling/orphan(tool 结果静默丢)。
+            # 故 mid-step 不触发切轮，等 step 完整(下条普通 user / final assistant)再闭合。
+            is_mid_step = (role == "tool") or (is_assistant and msg.get("tool_calls"))
+            if (over_steps or over_tokens) and not is_mid_step:
                 closed_round = state["current_round_id"]
                 close_round(
                     state,
                     "max_steps" if over_steps else "max_tokens",
                 )
                 need_open = True
-            # 否则：沿用当前 open 轮（连续 user / ReAct 段都走这里）
+            # 否则：沿用当前 open 轮（连续 user / ReAct 段 / mid-step 都走这里）
 
     now_iso = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%dT%H:%M:%S.%f")
 

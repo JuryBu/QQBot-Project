@@ -1485,6 +1485,12 @@ class TFileManager:
             aligned_count = _align_compress_count_to_round_boundary(
                 raw_messages, original_compress_count
             )
+            # S3 批3.5-C(forward-align-overshoots-keep-recent): align 向后挪(退到 0 时)
+            # 在「单个大 partial 轮覆盖到列表末尾」场景会返回 n(连续 user 刷屏 / 限流
+            # 不回复时 round_tracker 把所有消息归同一 partial 轮)，越过
+            # available_for_compress → remaining=[] → keep_recent 最近上下文被压光。
+            # 夹回上限保住最近 keep_recent 条(此场景宁可切分点不在 round 边界)。
+            aligned_count = min(aligned_count, available_for_compress)
             if aligned_count != original_compress_count:
                 logger.info(
                     f"[CHECKPOINT] {window_key}: F1.6 round 边界对齐切分 "
@@ -1495,8 +1501,13 @@ class TFileManager:
             # 总 compress_count = T1 消息对 + 原始消息压缩数
             compress_count = t1_count_in_candidate + original_compress_count
 
-            to_compress = candidate[:compress_count]
-            to_keep = candidate[compress_count:]
+            # S3 批3.5-C(candidate-raw-index-desync): to_compress 的原始消息部分从
+            # raw(t_file messages)切，与 remaining_messages(下方 raw 系)同下标系。
+            # candidate=build_llm_contexts 内 _repair_tool_call_pairs 插占位/删 orphan
+            # 会改变长度，若用 candidate[compress_count] 切则与 raw 系错位 → 被压缩段与
+            # 保留段错配 → 静默丢/重一条消息。旧 T1 摘要仍取 candidate 前缀(滚动压缩)。
+            t1_prefix = candidate[:t1_count_in_candidate]
+            to_compress = t1_prefix + raw_messages[:original_compress_count]
 
             # 序列化待压缩内容
             messages_text = serialize_messages_for_compress(to_compress)
