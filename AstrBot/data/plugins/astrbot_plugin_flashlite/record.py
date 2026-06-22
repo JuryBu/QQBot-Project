@@ -816,8 +816,16 @@ def tier_for_group(
     if not isinstance(group, dict):
         return TIER_FULL
 
-    # D8 守护：未封板组绝不降档（summary/brief 尚未预生成）。
-    if not group.get("sealed", False):
+    # D8 守护（S4 批7 真机修：防空洞的真正条件是「summary 文本存在」，非 sealed）：
+    # 原「未 sealed 即强制 full」把【降档】错误耦合到【封板】——封板由 force_seal
+    # (rg_force_seal_rounds15/tokens24000/age40) 控制、远晚于 tier_summary_age(20)，
+    # 致真轮组在 [summary_age, force_seal_age] 巨大缝隙间永远 full，D7 分级对真轮组沦为
+    # 死代码（真机实测群<GID> rg000001 轮龄7 > summary_age 却仍 full、老板娘直读原文
+    # 不降档、hit 也因无需查原文永不触发）。
+    # 解耦：降档只看「有无 summary_text」(防空洞本质——compose 已为每组产出 summary_text，
+    # 见 _specs_to_groups:1540)；封板归封板(控重压/合并边界)。无 summary 文本的组(模型未给)
+    # 仍保守留 full。brief 档无 brief_text 时 _select_tier_body 回退 summary_text，不空洞。
+    if not (group.get("summary_text") or "").strip():
         return TIER_FULL
 
     rr = group.get("round_range") or [None, None]
