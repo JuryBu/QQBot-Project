@@ -861,6 +861,14 @@ class TFileManager:
         # 全程不抢业务锁（仅 _load_t_file_raw / _append_messages_inner / save，皆无锁），
         # 故用独立锁串行化「同窗口并发首次 load」即可。
         self._recover_locks: Dict[str, asyncio.Lock] = {}
+        # S4 批4 M4/D10: per-window hit 命中队列。命中**不在生成期实时写**（D10 防三方
+        # 竞态：hit 写 vs compose 替换 round_groups vs S5 BPC）。record_hit 只把
+        # (rg_id, hit_type, now_ts, now_round) 入此内存队列；生成结束 + 锁释放后由
+        # compose_record_if_needed 锁内收尾（或独立 flush_hit_queue 收尾）统一落进
+        # metadata.record_state.hit_table，根除并发覆盖。进程崩溃丢未 flush 的队列项
+        # 可接受（hit 是软热度信号，丢失仅退化为纯 age 定档，符合 D9「崩溃缺失降级纯
+        # age 不报错」）；已落盘的 hit_table 走 T 文件原子 save，纳入崩溃恢复。
+        self._hit_queue: Dict[str, List[dict]] = {}
         # 确保 checkpoints 目录存在
         os.makedirs(CHECKPOINTS_DIR, exist_ok=True)
         # S3 F2.2 步骤 1：启动期全扫 GC 半写临时文件（.t_file_*.tmp / .state_*.tmp）。
@@ -2151,9 +2159,26 @@ class TFileManager:
                                 > record.parse_rg_id(old_grouped)):
                             disk_rec["last_grouped_rg_id"] = new_grouped
 
+                    # ★S4 批4 D9 重编号 key 迁移（必须在边界表替换【前】算）：compose 对
+                    # 回滚重写窗口内的组用 _next_rg_num 重新编号（rg_id 软号变，硬 round_id
+                    # 不变）。老 hit_table 的 key 可能在新 round_groups 里已不存在 → 直接替换
+                    # 边界表会让老 hit 悬空。先按 round_range 重叠把老 hit 迁移到新 rg_id。
+                    old_groups_for_hit = disk_rec.get("round_groups") or []
+                    old_hit_table = disk_rec.get("hit_table") or {}
+                    migrated_hit = record.migrate_hit_table_on_renumber(
+                        old_hit_table, old_groups_for_hit, compose_res.round_groups
+                    )
+
                     # 边界表替换：候选是「全量新 round_groups」（kept + 新组，已含 legacy +
                     # sealed 前缀）。上方单调守卫已确认磁盘未更超前，此替换不丢并发结果。
                     disk_rec["round_groups"] = compose_res.round_groups
+                    disk_rec["hit_table"] = migrated_hit  # 迁移后的 hit_table 落定
+
+                    # ★S4 批4 D10 收尾事务：边界表替换 + hit 迁移完成后，在【同一锁内同一
+                    # save】把内存 hit 队列 flush 进 hit_table。这是「根除三方竞态」的关键——
+                    # hit 写 / compose 替换 round_groups / BPC 都在这把 round_segment 锁内
+                    # 串行，hit 落盘永远基于最新 round_groups 现算 rg_id（队列存硬 round_id）。
+                    self._flush_hit_queue_into(disk_rec, window_key)
 
                     # last_compressed_round_id 单调推进 = 已聚合到的最大 round 终点。
                     if cand_end is not None:
@@ -2210,6 +2235,134 @@ class TFileManager:
             f"committed={total_groups_added} token {cur_tokens}→{last_tokens}"
         )
         return t_file, result
+
+    # ========================
+    # S4 批4 M4 / D9 / D10：hit 命中队列 + 收尾事务落盘
+    # ========================
+    def record_hit(
+        self,
+        window_key: str,
+        *,
+        round_int: Optional[int] = None,
+        rg_id: Optional[str] = None,
+        hit_type: str = "raw",
+        now_ts: Optional[float] = None,
+        now_round: Optional[int] = None,
+    ) -> bool:
+        """D10：登记一次命中——**只入内存队列，不实时写盘**（防三方竞态）。
+
+        命中信号（S4 批4 原文命中线）：主模型调 QQ_data_original 查历史原文 → 命中的
+        round 所属 round-group 打 hit。队列项**优先存硬 round_int**（compose 重编号后
+        rg_id 会变，round_id 永不变）；落盘时（compose 收尾 / flush_hit_queue）按最新
+        round_groups 现算 rg_id，根除「队列里 rg_id 失效」。也允许直接传 rg_id（record
+        命中线 S7 用，本批占位）。round_int 与 rg_id 至少给一个，否则忽略。
+
+        参数：
+          round_int : 命中的硬 round_id 整数（首选，落盘现算 rg_id）。
+          rg_id     : 直接指定 round-group（次选；round_int 缺时用）。
+          hit_type  : 'raw'（原文召回，强）/ 'record'（被动读，弱）。
+          now_ts    : 命中时刻（秒）；None → time.time()。
+          now_round : 命中时的当前最大轮（D10 hit_keep 锁定窗口锚）。
+        返回 True=已入队。
+        """
+        if round_int is None and not rg_id:
+            return False
+        if hit_type not in (record.HIT_TYPE_RAW, record.HIT_TYPE_RECORD):
+            hit_type = record.HIT_TYPE_RAW
+        ts = float(now_ts) if now_ts is not None else time.time()
+        item = {
+            "round_int": int(round_int) if round_int is not None else None,
+            "rg_id": rg_id,
+            "hit_type": hit_type,
+            "ts": ts,
+            "now_round": (
+                int(now_round)
+                if isinstance(now_round, int) and not isinstance(now_round, bool)
+                else None
+            ),
+        }
+        self._hit_queue.setdefault(window_key, []).append(item)
+        logger.debug(
+            f"[RECORD-HIT] {window_key}: 入队 round={round_int} rg={rg_id} "
+            f"type={hit_type}（队列 {len(self._hit_queue[window_key])} 项，待收尾落盘）"
+        )
+        return True
+
+    def _flush_hit_queue_into(self, record_state: dict, window_key: str) -> int:
+        """把 window_key 的 hit 队列 flush 进 record_state.hit_table（**调用方持锁**）。
+
+        必须在 round_segment 锁 + 业务锁内调用，且 record_state 已是磁盘最新（含本次
+        compose 替换后的 round_groups）。队列项按最新 round_groups 现算 rg_id（round_int
+        优先）→ apply_hit_to_table 累加。落盘由调用方的 save 统一完成（同一事务）。
+        清空已 flush 的队列。返回成功落定的命中条数。
+        """
+        queue = self._hit_queue.get(window_key)
+        if not queue:
+            return 0
+        hit_table = record_state.get("hit_table")
+        if not isinstance(hit_table, dict):
+            hit_table = {}
+            record_state["hit_table"] = hit_table
+        groups = record_state.get("round_groups") or []
+        applied = 0
+        deferred: List[dict] = []  # 命中早于聚合：round 还在末尾未聚合区 → 回填等将来
+        for item in queue:
+            rg_id = item.get("rg_id")
+            round_int = item.get("round_int")
+            # 优先按硬 round_int 现算 rg_id（compose 重编号无关，round_id 不变）。
+            if round_int is not None:
+                resolved = record.round_id_to_rg_id(round_int, groups)
+                if resolved:
+                    rg_id = resolved
+            if not rg_id:
+                # 命中的 round 尚未聚合进任何组（落末尾未聚合原文区）。**不丢弃**：回填队列，
+                # 待该 round 将来被 compose 聚合进组后再落盘（防「命中早于聚合 → hit 永久丢」
+                # 的软缺陷）。仅当 item 连 round_int 都没有（无锚的无效项）才真正丢弃。
+                if round_int is not None:
+                    deferred.append(item)
+                continue
+            record.apply_hit_to_table(
+                hit_table, rg_id, item.get("hit_type", "raw"),
+                item.get("ts", time.time()), item.get("now_round"),
+            )
+            applied += 1
+        # 回填未聚合命中（带上限，防极端下队列无限堆积——超限丢最老的，保留最近热度）。
+        _HIT_DEFER_CAP = 256
+        if len(deferred) > _HIT_DEFER_CAP:
+            deferred = deferred[-_HIT_DEFER_CAP:]
+        self._hit_queue[window_key] = deferred
+        if applied or deferred:
+            logger.debug(
+                f"[RECORD-HIT] {window_key}: 收尾落定 {applied} 命中进 hit_table"
+                f"（{len(deferred)} 条命中早于聚合，回填待将来）"
+            )
+        return applied
+
+    async def flush_hit_queue(self, window_key: str) -> int:
+        """无 compose 触发时的【独立收尾路径】：持锁把 hit 队列 flush 进 hit_table 并落盘。
+
+        compose_record_if_needed 已在其锁内事务顺带 flush（与边界表替换同一 save，无竞态）。
+        但命中往往发生在「请求体未超阈值、本轮不触发 compose」的常态轮，那些命中会一直
+        攒在队列里。本方法供 context_mixin 在每轮收尾（注入完成后）调用一次，确保命中及时
+        落盘、不无限堆积。持 round_segment 锁 + 业务锁（与 compose 同锁串行，仍无竞态）。
+        无队列项 → 不 load/不 save、直接返回 0。返回落定命中条数。
+        """
+        if not self._hit_queue.get(window_key):
+            return 0
+        seg_lock = self._get_round_segment_lock(window_key)
+        async with seg_lock:
+            async with self._get_lock(window_key):
+                # 再检查（进锁前可能被 compose 收尾清空）
+                if not self._hit_queue.get(window_key):
+                    return 0
+                disk_t = await self.load(window_key)
+                disk_meta = disk_t.setdefault("metadata", {})
+                disk_rec = disk_meta.setdefault("record_state", {})
+                applied = self._flush_hit_queue_into(disk_rec, window_key)
+                if applied:
+                    disk_meta["record_state"] = disk_rec
+                    await self.save(window_key, disk_t)
+                return applied
 
     # ========================
     # 数据库写入（面板统计）

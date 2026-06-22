@@ -774,6 +774,8 @@ def tier_for_group(
       ② hit_score 超阈值 → base 抬【至多一档】、封顶 full。
       ③ tier_hysteresis 滞回作用在 age 轴：边界 ±hysteresis 轮龄内、且方向与 prev 一致时粘住 prev，
          防边界轮反复横跳。hit 升档后再应用「只升不降」收敛（命中过的组本轮不因滞回掉回 base）。
+      ④ D10 命中锁定（hit_keep_active）：命中后 hit_keep_rounds 轮内强制至少抬一档不降，
+         替代 hit_score 时间衰减在相邻轮跨阈值造成的升降横跳（需 now_round + entry.last_hit_round）。
 
     **D8 守护（只 sealed 组允许降档）**：未封板（sealed!=True）的组**强制留 full**——summary/brief
     文本只在封板后预生成，未封板降档会读到空/旧摘要造空洞。故 sealed=False → 直接 full，不进阶梯。
@@ -818,22 +820,249 @@ def tier_for_group(
             if (boundary - hysteresis) <= age < (boundary + hysteresis):
                 base = prev_tier  # 滞回带内粘住上一档
 
-    # ---- ② hit 升档：hit_score 超阈值 → 抬一档、封顶 full ----
+    # ---- ② hit 升档：hit_score 超阈值 → 抬一档、封顶（D10 拆两线）----
     base_ord = _TIER_ORDER.get(base, _TIER_ORDER[TIER_FULL])
     ts = now_ts if now_ts is not None else _now_ts()
-    score = hit_score(group.get("rg_id"), hit_table, ts, cfg)
+    rg_id = group.get("rg_id")
+    score = hit_score(rg_id, hit_table, ts, cfg)
     upgrade_thresh = _cfg_float(cfg, "hit_upgrade_threshold", DEFAULT_HIT_UPGRADE_THRESHOLD)
+    cap_ord = _hit_upgrade_cap_ord(group)  # D10 封顶：文字线 full / 多模态原图线 summary
     final_ord = base_ord
     if score >= upgrade_thresh:
-        final_ord = min(base_ord + 1, _TIER_ORDER[TIER_FULL])  # 抬一档，封顶 full
+        final_ord = min(base_ord + 1, cap_ord)  # 抬一档，封顶到拆线上限
+
+    # ---- ④ D10 命中锁定（hit_keep_rounds 滞回）：命中即锁定保持 N 轮不降 ----
+    # hit_score 按时间衰减会在「相邻轮」掉回阈值下导致升档忽有忽无（横跳）。命中锁定
+    # 用「命中后 hit_keep_rounds 轮内强制至少抬一档」替代纯衰减，杜绝横跳。锁定不叠加
+    # hit 升档（二者都只抬一档、封顶同上），仅在 score 已衰减、但仍处锁定窗口时兜底升档。
+    if hit_keep_active(rg_id, hit_table, now_round, cfg):
+        final_ord = max(final_ord, min(base_ord + 1, cap_ord))
 
     return _TIER_BY_ORDER.get(final_ord, TIER_FULL)
+
+
+def _hit_upgrade_cap_ord(group: Dict[str, Any]) -> int:
+    """D10 升档封顶拆两线（返回 tier 序值上限）：
+      - 文字 record hit → 封顶 full（_TIER_ORDER[TIER_FULL]）。本批主线。
+      - 多模态原图 hit → 封顶 summary（_TIER_ORDER[TIER_SUMMARY]）：原图召回代价高，
+        升档只到 summary（带写入时快照摘要的文字层，RFS-07 自包含），不强拉回 full 原图。
+    判定组是否「多模态原图主导」靠组级 has_multimodal 标记——**S7 占位**：当前 compose
+    不产组级 has_multimodal（只 message 级有），故本批一律走文字线封顶 full；S7 填充组级
+    标记后此函数自动分流，无需再改 tier_for_group。
+    """
+    if isinstance(group, dict) and group.get("has_multimodal") is True:
+        return _TIER_ORDER[TIER_SUMMARY]  # 多模态原图线（S7 启用）
+    return _TIER_ORDER[TIER_FULL]         # 文字线（本批主线）
+
+
+# ========================
+# 批4 M4 / D10：hit 命中锁定（hit_keep_rounds 滞回）
+# ========================
+def hit_keep_active(
+    rg_id: Optional[str],
+    hit_table: Optional[Dict[str, Any]],
+    now_round: Optional[int],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """D10：该 round-group 是否处于「命中锁定窗口」内（命中后 hit_keep_rounds 轮内）。
+
+    命中即锁定（替代双阈值滞回）：组被命中那一刻记下 last_hit_round；此后
+    (now_round - last_hit_round) < hit_keep_rounds 期间，tier_for_group 强制其至少抬
+    一档不降，杜绝 hit_score 时间衰减在相邻轮反复跨阈值造成的升降档横跳。
+
+    判 False（不锁定）的情形：rg_id/hit_table 缺、entry 无 last_hit_round、now_round
+    不可用、或锁定窗口已过。窗口数 <=0 时永不锁定。**纯函数、绝不报错**（缺字段降级）。
+    """
+    if not rg_id or not isinstance(hit_table, dict) or now_round is None:
+        return False
+    entry = hit_table.get(rg_id)
+    if not isinstance(entry, dict):
+        return False
+    last_round = entry.get("last_hit_round")
+    if not isinstance(last_round, int) or isinstance(last_round, bool):
+        return False
+    keep = _cfg_int(cfg, "hit_keep_rounds", DEFAULT_HIT_KEEP_ROUNDS)
+    if keep <= 0:
+        return False
+    delta = int(now_round) - last_round
+    if delta < 0:
+        return False  # 命中轮在未来（时钟/号源异常）→ 不锁定
+    return delta < keep
 
 
 def _now_ts() -> float:
     """当前时间戳（秒）。抽出便于单测 monkeypatch / 注入。"""
     import time as _t
     return _t.time()
+
+
+# ========================
+# 批4 M4 / D9 / D10：hit 命中记录 + 重编号 key 迁移 + round→rg 映射
+# ========================
+HIT_TYPE_RAW = "raw"        # 原文召回命中（QQ_data_original 查原文，强信号）
+HIT_TYPE_RECORD = "record"  # record 被动读命中（cited_rounds 声明，弱信号；本批占位留 S7）
+
+
+def apply_hit_to_table(
+    hit_table: Dict[str, Any],
+    rg_id: str,
+    hit_type: str,
+    now_ts: float,
+    now_round: Optional[int] = None,
+) -> Dict[str, Any]:
+    """把一次命中累加进 hit_table（**原地修改并返回**；收尾事务 flush 队列时调用）。
+
+    D9 entry 结构：{hit_count, last_hit_ts, last_hit_type, last_hit_round}。
+      - hit_count   : 累加（次数越多越热，hit_score 据此放大）。
+      - last_hit_ts : 命中时间戳（秒；hit_score 时间衰减锚）。
+      - last_hit_type: raw / record（hit_score 据此取 hit_weight_raw / hit_weight_record）。
+      - last_hit_round: 命中时的 now_round（D10 hit_keep_active 锁定窗口锚；None 则不写，
+        锁定守降级失效但 hit_score 仍生效）。
+    非 dict hit_table / 空 rg_id → 原样返回不报错。hit_type 非法 → 归一为 raw。
+    """
+    if not isinstance(hit_table, dict) or not rg_id:
+        return hit_table if isinstance(hit_table, dict) else {}
+    if hit_type not in (HIT_TYPE_RAW, HIT_TYPE_RECORD):
+        hit_type = HIT_TYPE_RAW
+    entry = hit_table.get(rg_id)
+    if not isinstance(entry, dict):
+        entry = {"hit_count": 0}
+        hit_table[rg_id] = entry
+    try:
+        prev = int(entry.get("hit_count", 0) or 0)
+    except (TypeError, ValueError):
+        prev = 0
+    entry["hit_count"] = prev + 1
+    entry["last_hit_ts"] = float(now_ts)
+    entry["last_hit_type"] = hit_type
+    if isinstance(now_round, int) and not isinstance(now_round, bool):
+        entry["last_hit_round"] = now_round
+    return hit_table
+
+
+def round_id_to_rg_id(
+    round_int: int,
+    round_groups: Optional[List[Dict[str, Any]]],
+) -> Optional[str]:
+    """给定硬 round_id 整数，从 round_groups 边界表找它所属的 rg_id（命中触发用）。
+
+    按 round_range=[s,e] 闭区间匹配；命中多组（理论不应发生，区间应不重叠）取首个。
+    round_groups 为权威边界表（metadata.record_state.round_groups）。无匹配 → None
+    （该 round 尚未聚合进任何组，落在末尾未聚合原文区，不计 hit）。
+    """
+    if not isinstance(round_groups, list):
+        return None
+    for g in round_groups:
+        if not isinstance(g, dict):
+            continue
+        rr = g.get("round_range") or [None, None]
+        if len(rr) < 2:
+            continue
+        s = _coerce_round_int(rr[0])
+        e = _coerce_round_int(rr[1])
+        if s is None or e is None:
+            continue
+        if s <= int(round_int) <= e:
+            return g.get("rg_id")
+    return None
+
+
+def migrate_hit_table_on_renumber(
+    old_hit_table: Optional[Dict[str, Any]],
+    old_groups: Optional[List[Dict[str, Any]]],
+    new_groups: Optional[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """D9 重编号 key 迁移：compose 重写窗口致 rg_id 变 → 老 rg_id 的 hit 不丢。
+
+    compose 保留 kept 组的 rg_id 不变、对回滚重写窗口内的组用 _next_rg_num 重新编号
+    （rg_id 是展示软号，硬 round_id 不变）。故老 hit_table 的 key 可能在 new_groups
+    里已不存在 → 直接搬运会丢命中。迁移策略（按 round_range 重叠映射）：
+      ① 老 rg_id 在 new_groups 仍存在（kept 段）→ entry 原样保留。
+      ② 老 rg_id 不在 new_groups（被重写）→ 用老组 round_range 的中点（或起点）找
+         new_groups 里覆盖该 round 的新组，hit 迁移到新 rg_id。
+      ③ 多个老组映射到同一新组（合并）→ entry 合并：hit_count 求和、last_hit_ts 取最大
+         （最近）、last_hit_type/last_hit_round 跟随最近那条。
+      ④ 老组找不到对应新组（被裁掉/区间消失）→ 丢弃该 entry（对应内容已不在 record）。
+    纯函数，返回新 hit_table（不改入参）。任一为空/非法 → 返回 {} 或原样安全降级。
+    """
+    if not isinstance(old_hit_table, dict) or not old_hit_table:
+        return {}
+    new_groups = new_groups if isinstance(new_groups, list) else []
+    old_groups = old_groups if isinstance(old_groups, list) else []
+
+    # 新组 rg_id 集合（判断老 key 是否仍存在）。
+    new_rg_ids = {
+        g.get("rg_id") for g in new_groups
+        if isinstance(g, dict) and g.get("rg_id")
+    }
+    # 老 rg_id → round_range（用于 ② 重叠映射定位锚 round）。
+    old_range_by_rg: Dict[str, Tuple[Optional[int], Optional[int]]] = {}
+    for g in old_groups:
+        if not isinstance(g, dict):
+            continue
+        rid = g.get("rg_id")
+        if not rid:
+            continue
+        rr = g.get("round_range") or [None, None]
+        s = _coerce_round_int(rr[0]) if len(rr) >= 1 else None
+        e = _coerce_round_int(rr[1]) if len(rr) >= 2 else None
+        old_range_by_rg[rid] = (s, e)
+
+    out: Dict[str, Any] = {}
+
+    def _merge_into(target_rg: str, entry: Dict[str, Any]) -> None:
+        """把 entry 合并进 out[target_rg]（③ 合并语义）。"""
+        if not isinstance(entry, dict):
+            return
+        try:
+            cnt = int(entry.get("hit_count", 0) or 0)
+        except (TypeError, ValueError):
+            cnt = 0
+        if cnt <= 0:
+            cnt = 0
+        cur = out.get(target_rg)
+        if not isinstance(cur, dict):
+            out[target_rg] = dict(entry)
+            out[target_rg]["hit_count"] = cnt
+            return
+        # 合并：count 求和；ts 取最近，type/round 跟随最近那条。
+        try:
+            cur_cnt = int(cur.get("hit_count", 0) or 0)
+        except (TypeError, ValueError):
+            cur_cnt = 0
+        cur["hit_count"] = cur_cnt + cnt
+        new_ts = entry.get("last_hit_ts")
+        cur_ts = cur.get("last_hit_ts")
+        if isinstance(new_ts, (int, float)) and (
+            not isinstance(cur_ts, (int, float)) or new_ts >= cur_ts
+        ):
+            cur["last_hit_ts"] = new_ts
+            if entry.get("last_hit_type") is not None:
+                cur["last_hit_type"] = entry.get("last_hit_type")
+            if entry.get("last_hit_round") is not None:
+                cur["last_hit_round"] = entry.get("last_hit_round")
+
+    for old_rg, entry in old_hit_table.items():
+        if not isinstance(entry, dict):
+            continue
+        # ① 老 key 在新组里仍存在 → 原样保留。
+        if old_rg in new_rg_ids:
+            _merge_into(old_rg, entry)
+            continue
+        # ② 老组被重写 → 用老组 round_range 锚 round 找覆盖它的新组。
+        s, e = old_range_by_rg.get(old_rg, (None, None))
+        anchor: Optional[int] = None
+        if s is not None and e is not None and e >= s:
+            anchor = (s + e) // 2  # 区间中点（更稳，避开边界）
+        elif s is not None:
+            anchor = s
+        elif e is not None:
+            anchor = e
+        target = round_id_to_rg_id(anchor, new_groups) if anchor is not None else None
+        if target:
+            _merge_into(target, entry)
+        # ④ 找不到新组（内容被裁掉）→ 丢弃 entry，不进 out。
+    return out
 
 
 def build_tier_map(
@@ -1742,6 +1971,41 @@ class RecordStore:
         cfg: Optional[Dict[str, Any]] = None,
     ) -> float:
         return hit_score(rg_id, hit_table, now_ts, cfg)
+
+    # ---- 批4 M4 / D9 / D10：hit 命中记录 / 锁定 / 迁移 / 映射 ----
+    @staticmethod
+    def hit_keep_active(
+        rg_id: Optional[str],
+        hit_table: Optional[Dict[str, Any]],
+        now_round: Optional[int],
+        cfg: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        return hit_keep_active(rg_id, hit_table, now_round, cfg)
+
+    @staticmethod
+    def apply_hit_to_table(
+        hit_table: Dict[str, Any],
+        rg_id: str,
+        hit_type: str,
+        now_ts: float,
+        now_round: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return apply_hit_to_table(hit_table, rg_id, hit_type, now_ts, now_round)
+
+    @staticmethod
+    def round_id_to_rg_id(
+        round_int: int,
+        round_groups: Optional[List[Dict[str, Any]]],
+    ) -> Optional[str]:
+        return round_id_to_rg_id(round_int, round_groups)
+
+    @staticmethod
+    def migrate_hit_table_on_renumber(
+        old_hit_table: Optional[Dict[str, Any]],
+        old_groups: Optional[List[Dict[str, Any]]],
+        new_groups: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        return migrate_hit_table_on_renumber(old_hit_table, old_groups, new_groups)
 
     def generate_summaries_for_sealed(
         self,

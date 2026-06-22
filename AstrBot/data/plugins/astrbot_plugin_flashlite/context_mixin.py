@@ -458,6 +458,158 @@ class ContextMixin:
 
         return "(暂无上下文数据，建议等待 persistence 插件收集)"
 
+    # ========================
+    # S4 批4 D10：原文召回命中触发（QQ_data_original → round-group hit）
+    # ========================
+    # 匹配 QQ_data_original 返回文本里的 "msg_id=XXX"（工具结果每行 [..] sender (msg_id=N): text）
+    _HIT_MSGID_RE = re.compile(r"msg_id=([^\s)]+)")
+
+    def _record_raw_hits_from_contexts(
+        self, window_key: str, contexts, t_file: dict
+    ) -> int:
+        """D10 原文命中线：上一轮主模型若调了 QQ_data_original 查历史原文，把命中的
+        round 所属 round-group 登记成 hit（**入队不实时写**，weight=hit_weight_raw）。
+
+        命中信号来源（调研结论，见记忆 20260622-203511396）：on_llm_response 拿不到
+        中间 ReAct step 的 tool 配对，故从 on_llm_request 的 req.contexts（替换前的上一轮
+        完整上下文）反查 assistant.tool_calls + 紧随的 role=tool 结果。
+
+        round 定位（messages.db 的 round_id 当前全 NULL，不可用）：靠 **T 文件 messages**
+        的 message_id ↔ round_id 映射。
+          ① 工具结果文本里的每个 msg_id → 在 t_file.messages 找 message_id 匹配项取 round_id。
+          ② 工具参数 around_msg_id（resolve @quoted 后）同样匹配 message_id 取 round_id。
+        命中 round_id 经 record_hit 入队（队列存硬 round_int，落盘现算 rg_id，compose
+        重编号无关）。record 被动读命中（cited_rounds）需结构化输出，本批留 S7（见返回说明）。
+
+        返回入队的命中条数。纯 best-effort，任何异常由调用方吞掉不阻断注入。
+        """
+        mgr = getattr(self, "_t_file_mgr", None)
+        if not mgr or not hasattr(mgr, "record_hit"):
+            return 0
+        if not isinstance(contexts, list) or not contexts:
+            return 0
+
+        # T 文件 message_id → round_id（整数）映射。message_id 非空、round_id 可解析才纳入。
+        msgid_to_round: Dict[str, int] = {}
+        try:
+            for m in t_file.get("messages", []) or []:
+                if not isinstance(m, dict):
+                    continue
+                mid = m.get("message_id")
+                rid = m.get("round_id")
+                if mid is None or rid is None:
+                    continue
+                # round_id 解析：裸 int 直接取；"r000005" 形式只去【单个】前缀 'r'
+                # （对齐 round_tracker.parse_round_id 的 rid[1:] 口径，不用 lstrip——
+                # lstrip 会剥掉开头所有 'r'，脏前缀下与 parse_round_id 发散）。
+                if isinstance(rid, bool):
+                    continue
+                if isinstance(rid, int):
+                    rnum = rid
+                else:
+                    s = str(rid)
+                    s = s[1:] if s[:1] == "r" else s
+                    try:
+                        rnum = int(s)
+                    except (TypeError, ValueError):
+                        continue
+                msgid_to_round.setdefault(str(mid), rnum)
+        except Exception:
+            return 0
+        if not msgid_to_round:
+            return 0  # T 文件无可锚消息（如全 legacy round_id=None）→ 无法定位，跳过
+
+        # now_round（D10 hit_keep 锁定窗口锚）= 已分配最大轮 = next_round_id - 1。
+        now_round: Optional[int] = None
+        try:
+            meta = t_file.get("metadata", {}) or {}
+            now_round = int(meta.get("next_round_id", 1) or 1) - 1
+        except (TypeError, ValueError):
+            now_round = None
+
+        # 收集本次反查到的命中 msg_id 集合（去重）。
+        hit_msgids: set = set()
+        n = len(contexts)
+        for i, msg in enumerate(contexts):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls") or []
+            if not isinstance(tool_calls, list):
+                continue
+            called_qq = False
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                if fn.get("name") != "QQ_data_original":
+                    continue
+                called_qq = True
+                # 工具参数里的 around_msg_id（模型显式查的那条消息）。
+                args_raw = fn.get("arguments")
+                if isinstance(args_raw, str):
+                    try:
+                        args = json.loads(args_raw)
+                    except (ValueError, TypeError):
+                        args = {}
+                elif isinstance(args_raw, dict):
+                    args = args_raw
+                else:
+                    args = {}
+                around = args.get("around_msg_id")
+                if around:
+                    # @quoted 快捷语法：尽力 resolve（main.py 有 _resolve_quoted）。
+                    resolver = getattr(self, "_resolve_quoted", None)
+                    if callable(resolver):
+                        try:
+                            around = resolver(around)
+                        except Exception:
+                            pass
+                    hit_msgids.add(str(around))
+            if not called_qq:
+                continue
+            # 紧随该 assistant 的 role=tool 结果消息：抠出所有 msg_id。
+            for j in range(i + 1, n):
+                sub = contexts[j]
+                if not isinstance(sub, dict):
+                    break
+                sr = sub.get("role")
+                if sr == "tool":
+                    body = sub.get("content", "")
+                    if isinstance(body, str) and body:
+                        for mm in self._HIT_MSGID_RE.findall(body):
+                            hit_msgids.add(str(mm))
+                elif sr == "assistant":
+                    break  # 下一个 step 开始
+
+        if not hit_msgids:
+            return 0
+
+        # 命中 msg_id → round_id → 去重 round 集合 → record_hit 入队。
+        hit_rounds: set = set()
+        for mid in hit_msgids:
+            rnum = msgid_to_round.get(mid)
+            if rnum is not None:
+                hit_rounds.add(rnum)
+
+        count = 0
+        for rnum in hit_rounds:
+            try:
+                if mgr.record_hit(
+                    window_key,
+                    round_int=rnum,
+                    hit_type="raw",
+                    now_round=now_round,
+                ):
+                    count += 1
+            except Exception:
+                continue
+        if count:
+            logger.info(
+                f"[RECORD-HIT] {window_key}: 原文召回命中 {count} round "
+                f"(rounds={sorted(hit_rounds)}) 已入队待收尾落盘"
+            )
+        return count
+
     async def _inject_flashlite_context_impl(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
@@ -695,6 +847,18 @@ class ContextMixin:
                             await self._t_file_mgr.save(window_key, t_file)
                             logger.debug(f"[T-FILE] {window_key}: 追加 {len(new_msgs)} 条新消息")
 
+                    # S4 批4 D10 命中触发（原文召回线）：上一轮主模型若调了
+                    # QQ_data_original 查历史原文，命中的 round 所属 round-group 打 hit。
+                    # **只入内存队列、不实时写盘**（防三方竞态）；本轮若触发 compose，其
+                    # 锁内收尾顺带 flush；否则下方注入收尾调 flush_hit_queue 落盘。
+                    # 从 req.contexts（此刻仍是替换前的原始上一轮上下文）检测。失败不阻断注入。
+                    try:
+                        self._record_raw_hits_from_contexts(
+                            window_key, req.contexts, t_file
+                        )
+                    except Exception as _he:
+                        logger.debug(f"[RECORD-HIT] {window_key}: 命中检测跳过 {_he}")
+
                     # Phase 2（锁外，秒级）: S4 R2 旧 T1 覆盖式压缩已退役 → record 增量聚合。
                     # 组装 record_cfg（面板可调参数透传给 compose_record / force_seal /
                     # 接力中止）；缺键由 record 模块 DEFAULT 兜底。
@@ -733,6 +897,20 @@ class ContextMixin:
                     if compress_result:
                         self._stats["checkpoints"] = self._stats.get("checkpoints", 0) + 1
                         logger.info(f"[CHECKPOINT] {window_key}: 压缩完成 {compress_result}")
+
+                    # S4 批4 D10 hit 收尾落盘（独立路径）：compose 触发时其锁内已顺带 flush
+                    # 队列（此处队列空、flush 直接返回 0 无副作用）；未触发 compose 的常态轮，
+                    # 命中仍攒在队列里，这里持锁统一落盘，防无限堆积。落定后重新 load t_file
+                    # 让本轮分级定档即时用上最新 hit（hit_table 已写盘，否则也仅滞后一轮）。
+                    try:
+                        _flushed = await self._t_file_mgr.flush_hit_queue(window_key)
+                        if _flushed:
+                            t_file = await self._t_file_mgr.load(window_key)
+                            logger.debug(
+                                f"[RECORD-HIT] {window_key}: 收尾落定 {_flushed} 命中"
+                            )
+                    except Exception as _hfe:
+                        logger.debug(f"[RECORD-HIT] {window_key}: hit 收尾落盘跳过 {_hfe}")
 
                     # 核心：替换 req.contexts 为 T 文件构建的上下文
                     # S4 R3(D7)：注入主路径传 window_key → 切 record 视图（已聚合读

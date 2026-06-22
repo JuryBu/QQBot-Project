@@ -263,7 +263,7 @@
     "hit_keep_rounds": {
         "description": "S4 record：命中即锁定保持轮数（D10，替代双阈值滞回，命中后留高档 N 轮）",
         "type": "int",
-        "hint": "D10 命中即锁定。批3 先占位，批4 hit 子系统消费",
+        "hint": "D10 命中即锁定。批4 已实装：tier_for_group 的 hit_keep_active 守，命中后 N 轮强制不降",
         "default": 3,
         "minimum": 1
     },
