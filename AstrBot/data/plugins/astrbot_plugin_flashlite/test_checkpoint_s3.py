@@ -319,7 +319,8 @@ def test_v2_fields_complete(tmp_ckpt):
     assert m["step_id"] is not None
     # S3 不用的留默认
     assert m["compressed"] is False
-    assert m["rg_id"] is None
+    # S4 D4（批2a）：message.rg_id 字段已砍——组归属按 round_id 区间从 sidecar 推断
+    assert "rg_id" not in m
     assert m["recalled"] is False
 
 

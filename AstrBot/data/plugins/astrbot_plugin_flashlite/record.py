@@ -11,12 +11,29 @@ record.md 读写 / 渲染 / 写入门禁 / record_index sidecar 权威映射。
         render_index_from_state 重建 sidecar。
   - D2：sidecar 是权威映射。定位/增量/hit 全靠它，不解析模型自由文本。
 
-本批（批1a）只做【地基】：
+批1a【地基】（已完成）：
   - 读写（read_record / write_record_atomic 候选隔离）
   - 渲染（render_record_md）
   - 门禁（validate_composed_record）
   - sidecar（load_index / save_index / rebuild_index_if_stale）
-**不实现** compose_record（D3 Local Compose 增量聚合，批2）、force_seal（D3 强制收敛，批2）。
+
+批2a【确定性聚合】（本批新增）：
+  - compose_record（D3 Local Compose 增量聚合：代码确定性回滚最后 N 组划重写窗口，
+    模型只在窗口内重新分段，**绝不逐轮问模型**——照 mcp selectLocalComposeBoundary）
+  - force_seal_check（D3 强制收敛：组达 rg_force_seal_rounds(15)/token/age 任一 →
+    强制封档，无视「话题未结」开放信号，防群聊反复重压漂移）
+  - 预算切批（M3：字符/token 预算硬约束切批 + rg_target_rounds 软目标；单轮超预算
+    走 step 级切批 fallback，巨轮独占一批并强制单组封档防撑爆）
+  - LLM 失败兜底：该批维持未分组态、回退 full 直读、带重试 + 冷却建议（不实际 sleep）
+
+LLM caller 注入契约（mock 可替身，单测用确定性 mock）：
+  llm_caller(batch_rounds: List[RoundView], cfg: dict) -> List[GroupSpec]
+    RoundView : {round_int:int, round_id:str, text:str, char_len:int, token_est:int,
+                 oversize:bool}
+    GroupSpec : {round_start:int, round_end:int, full_text:str, summary_text:str,
+                 title:str}（round_start/end 为 round_id 整数闭区间，必须落在本批轮内）
+  约定：compose 先做预算硬切批，caller 只在「给定一批轮」内吐分段；caller 抛异常 /
+  返回空 / 返回越界区间 → 触发失败兜底（不写盘、维持未分组态）。
 
 本模块为**纯逻辑**（参照 round_tracker.py）：不依赖 astrbot.api，I/O 仅用标准库，
 便于单测。日志走传入的 logger 或标准库 logging。复用 round_tracker.parse_round_id
@@ -527,6 +544,580 @@ def _grouped_round_watermark(prev_state: Dict[str, Any]) -> Optional[int]:
 
 
 # ========================
+# 批2a 默认参数（cfg 缺省兜底；正式值由 _conf_schema.json 提供，后续批次接线）
+# ========================
+DEFAULT_RG_TARGET_ROUNDS = 8          # M3 软目标：每组目标轮数
+DEFAULT_RG_FORCE_SEAL_ROUNDS = 15     # D3 强制封档：组轮数上限
+DEFAULT_RG_FORCE_SEAL_TOKENS = 24000  # D3 强制封档：组 token 上限
+DEFAULT_RG_FORCE_SEAL_AGE = 40        # D3 强制封档：组轮龄上限（now_round - 组终点）
+DEFAULT_RG_MAX_BATCH_CHARS = 60000    # M3 硬约束：单批字符预算（照 mcp 60K）
+DEFAULT_RG_MAX_BATCH_TOKENS = 16000   # M3 硬约束：单批 token 预算
+DEFAULT_RG_ROLLBACK_SHORT_ROUNDS = 4  # D3：尾组「短」判据（轮数 < 此值）
+DEFAULT_RG_ROLLBACK2_NEW_ROUNDS = 10  # D3：触发回滚 2 组的新增轮数门槛
+DEFAULT_RG_LLM_RETRIES = 1            # 失败兜底：caller 额外重试次数
+DEFAULT_RG_COOLDOWN_S = 60            # 失败兜底：建议冷却秒数（不实际 sleep）
+
+_RG_PREFIX = "rg"
+_RG_WIDTH = 6
+
+
+def _cfg_int(cfg: Optional[Dict[str, Any]], key: str, default: int) -> int:
+    """从 cfg 取 int，缺失/非法回退默认。"""
+    if not isinstance(cfg, dict):
+        return default
+    try:
+        v = cfg.get(key, default)
+        return int(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def format_rg_id(n: int) -> str:
+    """round-group 软轮号全限定字符串：rg{int:06d}。"""
+    return f"{_RG_PREFIX}{n:0{_RG_WIDTH}d}"
+
+
+def parse_rg_id(rg_id: Any) -> int:
+    """解析 rg_id（'rg000123' → 123）；非法/None 返回 -1。"""
+    if not rg_id or not isinstance(rg_id, str) or not rg_id.startswith(_RG_PREFIX):
+        return -1
+    try:
+        return int(rg_id[len(_RG_PREFIX):])
+    except ValueError:
+        return -1
+
+
+# ========================
+# 批2a D3 强制收敛：force_seal_check
+# ========================
+def force_seal_check(
+    group: Dict[str, Any],
+    cfg: Optional[Dict[str, Any]] = None,
+    *,
+    now_round: Optional[int] = None,
+) -> bool:
+    """D3 强制收敛：组达「轮数 / token / age」任一上限 → 应强制封档。
+
+    **无视「话题未结」开放信号**——群聊里 @未回复 / 话题未结长期为真，若任由模型判
+    「开放」则末尾组永远不封、反复重写重压 → 上下文漂移（主人最怕胡说八道）。故达硬
+    阈值即封，与模型的开放意愿无关。
+
+    判据（任一为真即返回 True）：
+      1. 轮数：组覆盖轮数（round_range 跨度 + 1）>= rg_force_seal_rounds（默认 15）。
+      2. token：组累计 token 估计 >= rg_force_seal_tokens（默认 24000；组需带
+         token_est 字段，无则跳过此判据）。
+      3. age ：now_round 给定时，组轮龄（now_round - round_range[1]）>= rg_force_seal_age
+         （默认 40）。age 衡量「这组离最新对话多远」，太老的开放组也强制收敛。
+
+    返回 True=应封档（调用方据此置 sealed=True）。纯函数，无副作用。
+    """
+    if not isinstance(group, dict):
+        return False
+
+    seal_rounds = _cfg_int(cfg, "rg_force_seal_rounds", DEFAULT_RG_FORCE_SEAL_ROUNDS)
+    seal_tokens = _cfg_int(cfg, "rg_force_seal_tokens", DEFAULT_RG_FORCE_SEAL_TOKENS)
+    seal_age = _cfg_int(cfg, "rg_force_seal_age", DEFAULT_RG_FORCE_SEAL_AGE)
+
+    rr = group.get("round_range") or [None, None]
+    s = _coerce_round_int(rr[0]) if len(rr) >= 1 else None
+    e = _coerce_round_int(rr[1]) if len(rr) >= 2 else None
+
+    # 1) 轮数上限
+    if s is not None and e is not None and e >= s:
+        if (e - s + 1) >= seal_rounds:
+            return True
+
+    # 2) token 上限（组带 token_est 时）
+    tok = group.get("token_est")
+    if isinstance(tok, (int, float)) and tok >= seal_tokens:
+        return True
+
+    # 3) age 上限（给定 now_round 时）
+    if now_round is not None and e is not None:
+        if (now_round - e) >= seal_age:
+            return True
+
+    return False
+
+
+def _coerce_round_int(v: Any) -> Optional[int]:
+    """round_range 端点统一成 int（裸 int 或 'r000123' 字符串）；非法返回 None。"""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        n = round_tracker.parse_round_id(v)
+        return n if n >= 0 else None
+    return None
+
+
+# ========================
+# 批2a：轮聚合 / 预算切批 / compose_record（D3 确定性聚合）
+# ========================
+class ComposeResult:
+    """compose_record 的结构化返回。
+
+    字段：
+      wrote          : bool，本次是否产出并写盘（validate 通过 + 有实际变化）。
+      round_groups   : List[dict]，新的边界表（回滚窗口外旧组不动 + 窗口内重分段新组）；
+                       失败兜底时回传【未改动】的 prev round_groups（维持未分组态）。
+      last_grouped_rg_id : str|None，单调推进后的聚合锚（取 round_groups 末组 rg_id）。
+      record_md      : str，渲染后的 record.md 文本（未写盘时为已有/空）。
+      errors         : List[str]，门禁拒收 / LLM 失败的原因（人读）。
+      fallback       : bool，是否走了失败兜底（LLM 失败 / 无产出）。
+      cooldown_until : float|None，建议冷却时间戳（now+cooldown_s）；调用方据此跳过重试，
+                       compose 本身不 sleep（纯逻辑、单测友好）。
+    """
+
+    __slots__ = (
+        "wrote", "round_groups", "last_grouped_rg_id", "record_md",
+        "errors", "fallback", "cooldown_until",
+    )
+
+    def __init__(
+        self,
+        *,
+        wrote: bool,
+        round_groups: List[Dict[str, Any]],
+        last_grouped_rg_id: Optional[str],
+        record_md: str,
+        errors: Optional[List[str]] = None,
+        fallback: bool = False,
+        cooldown_until: Optional[float] = None,
+    ) -> None:
+        self.wrote = wrote
+        self.round_groups = round_groups
+        self.last_grouped_rg_id = last_grouped_rg_id
+        self.record_md = record_md
+        self.errors = errors or []
+        self.fallback = fallback
+        self.cooldown_until = cooldown_until
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "wrote": self.wrote,
+            "round_groups": self.round_groups,
+            "last_grouped_rg_id": self.last_grouped_rg_id,
+            "record_md": self.record_md,
+            "errors": list(self.errors),
+            "fallback": self.fallback,
+            "cooldown_until": self.cooldown_until,
+        }
+
+
+def _rounds_from_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把已闭合的 message 列表按 round_id 聚合成有序「轮」视图。
+
+    - 丢弃 round_id 不可解析的消息（legacy round_id=None 永不进组，D4）。
+    - 同一 round_id 的多条 message（user / assistant / tool ReAct 段）聚成一轮，
+      文本按出现顺序拼接，token_est 累加（用 message 自带 token 估计，缺则按字符粗估）。
+    - 输出按 round_int 升序；每轮：
+        {round_int, round_id, text, char_len, token_est, msg_count}
+    """
+    buckets: Dict[int, Dict[str, Any]] = {}
+    order: List[int] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        rn = round_tracker.parse_round_id(m.get("round_id"))
+        if rn < 0:
+            continue  # legacy / 无号，不进组
+        b = buckets.get(rn)
+        if b is None:
+            b = {
+                "round_int": rn,
+                "round_id": m.get("round_id"),
+                "_parts": [],
+                "token_est": 0,
+                "msg_count": 0,
+            }
+            buckets[rn] = b
+            order.append(rn)
+        role = m.get("role") or ""
+        content = m.get("content")
+        text = content if isinstance(content, str) else (
+            json.dumps(content, ensure_ascii=False) if content is not None else ""
+        )
+        b["_parts"].append(f"{role}: {text}".strip())
+        b["msg_count"] += 1
+        tok = m.get("token_est") or m.get("tokens")
+        if isinstance(tok, (int, float)):
+            b["token_est"] += int(tok)
+        else:
+            # 粗估：~4 字符 1 token（仅兜底，真实估算在 checkpoint.estimate_tokens）
+            b["token_est"] += max(1, len(text) // 4)
+
+    rounds: List[Dict[str, Any]] = []
+    for rn in sorted(order):
+        b = buckets[rn]
+        joined = "\n".join(b["_parts"])
+        rounds.append({
+            "round_int": rn,
+            "round_id": b["round_id"],
+            "text": joined,
+            "char_len": len(joined),
+            "token_est": int(b["token_est"]),
+            "msg_count": b["msg_count"],
+        })
+    return rounds
+
+
+def _partition_groups(
+    prev_groups: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """把已有 round_groups 拆成「不可回滚（sealed/legacy）」与「尾部可回滚」两段。
+
+    可回滚 = 列表尾部【连续】的非 sealed 非 legacy 组。一旦从尾往前遇到 sealed/legacy
+    就停（已封档段绝不回滚，增量约束「已封档 sealed 组不动」）。
+    返回 (kept_locked_prefix_unused, rollbackable_tail)：第一个返回值实际是「除可回滚尾部
+    外的全部前缀」（含 sealed/legacy + 它们之前的组），调用方据 rollback_count 再切。
+    """
+    groups = [g for g in (prev_groups or []) if isinstance(g, dict)]
+    i = len(groups)
+    while i > 0:
+        g = groups[i - 1]
+        if g.get("sealed") or g.get("legacy_rg"):
+            break
+        i -= 1
+    prefix = groups[:i]
+    rollbackable = groups[i:]
+    return prefix, rollbackable
+
+
+def _decide_rollback_count(
+    rollbackable: List[Dict[str, Any]],
+    new_rounds_count: int,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> int:
+    """D3 确定性回滚组数：默认 1；尾组短且新增多 → 2。clamp 到可回滚组数。
+
+    - 无可回滚组（首次聚合 / 全封档）→ 0（纯新增，不回滚）。
+    - 默认回滚 1 组（最后一组并入重写窗口，吸收新增轮重新分段）。
+    - 若最后一组「短」（覆盖轮数 < rg_rollback_short_rounds，默认 4）且新增未聚合轮
+      >= rg_rollback2_new_rounds（默认 10）→ 回滚 2 组（把碎尾合并重切）。
+    """
+    if not rollbackable:
+        return 0
+    short_thresh = _cfg_int(cfg, "rg_rollback_short_rounds", DEFAULT_RG_ROLLBACK_SHORT_ROUNDS)
+    new_thresh = _cfg_int(cfg, "rg_rollback2_new_rounds", DEFAULT_RG_ROLLBACK2_NEW_ROUNDS)
+
+    count = 1
+    last = rollbackable[-1]
+    rr = last.get("round_range") or [None, None]
+    s = _coerce_round_int(rr[0]) if len(rr) >= 1 else None
+    e = _coerce_round_int(rr[1]) if len(rr) >= 2 else None
+    last_span = (e - s + 1) if (s is not None and e is not None and e >= s) else 0
+    if last_span and last_span < short_thresh and new_rounds_count >= new_thresh:
+        count = 2
+    return min(count, len(rollbackable))
+
+
+def _split_window_into_batches(
+    window_rounds: List[Dict[str, Any]],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """M3 预算硬切批：按【字符 / token 预算】把窗口轮切成多批喂给 caller。
+
+    M3 优先级铁律（mcp createRecordChunks）：**字符/token 预算是硬约束，轮数是软目标**。
+    故切批只受字符/token 预算驱动，**不以轮数硬切批**——轮数上限只在 force_seal_check
+    里约束单个组别太大（rg_force_seal_rounds），不在此处割裂窗口、阻止模型在完整窗口内
+    自由分段（否则 rg_target_rounds 软目标会被批边界强行打散）。
+
+    - 硬约束（任一超即另起一批）：累计 char >= rg_max_batch_chars（默认 60K）、
+      累计 token >= rg_max_batch_tokens（默认 16K）。
+    - **单轮超预算（巨轮）→ step 级切批 fallback**：该轮自身 char/token 已超单批预算，
+      则独占一批（oversize=True），绝不与其它轮挤一批撑爆；后续强制单组 + 封档，
+      防巨图 / 超长单轮反复重压死循环。
+
+    返回 [{rounds:[...], oversize:bool}, ...]，批内 rounds 保持 round_int 升序。
+    """
+    max_chars = _cfg_int(cfg, "rg_max_batch_chars", DEFAULT_RG_MAX_BATCH_CHARS)
+    max_tokens = _cfg_int(cfg, "rg_max_batch_tokens", DEFAULT_RG_MAX_BATCH_TOKENS)
+
+    batches: List[Dict[str, Any]] = []
+    cur: List[Dict[str, Any]] = []
+    cur_chars = 0
+    cur_tokens = 0
+
+    def _flush():
+        nonlocal cur, cur_chars, cur_tokens
+        if cur:
+            batches.append({"rounds": cur, "oversize": False})
+            cur = []
+            cur_chars = 0
+            cur_tokens = 0
+
+    for r in window_rounds:
+        rc = int(r.get("char_len", 0) or 0)
+        rt = int(r.get("token_est", 0) or 0)
+
+        # 巨轮：单轮自身超单批预算 → step 级 fallback，独占一批
+        if rc >= max_chars or rt >= max_tokens:
+            _flush()
+            batches.append({"rounds": [dict(r, oversize=True)], "oversize": True})
+            continue
+
+        # 字符/token 预算硬约束：累计已超且当前批非空 → 先封批再放本轮
+        if cur and (cur_chars + rc >= max_chars or cur_tokens + rt >= max_tokens):
+            _flush()
+        cur.append(r)
+        cur_chars += rc
+        cur_tokens += rt
+
+    _flush()
+    return batches
+
+
+def _call_llm_with_retry(
+    llm_caller,
+    batch_rounds: List[Dict[str, Any]],
+    cfg: Optional[Dict[str, Any]],
+    log: logging.Logger,
+) -> Tuple[bool, List[Dict[str, Any]]]:
+    """调 llm_caller 并带有限重试。返回 (ok, specs)。
+
+    任一次成功（返回非空 list）即返回；全部失败（异常 / 返回空 / None）→ (False, [])。
+    无 sleep（冷却由 compose 上层用 cooldown_until 协调，纯逻辑单测友好）。
+    """
+    retries = _cfg_int(cfg, "rg_llm_retries", DEFAULT_RG_LLM_RETRIES)
+    attempts = max(1, retries + 1)
+    last_err: Optional[str] = None
+    for attempt in range(attempts):
+        try:
+            specs = llm_caller(batch_rounds, cfg)
+        except Exception as e:  # noqa: BLE001
+            last_err = f"caller 异常({type(e).__name__}): {e}"
+            log.warning(f"[RECORD] compose LLM 第{attempt + 1}次失败: {last_err}")
+            continue
+        if isinstance(specs, list) and specs:
+            return True, specs
+        last_err = "caller 返回空 / 非列表"
+        log.warning(f"[RECORD] compose LLM 第{attempt + 1}次无产出")
+    return False, []
+
+
+def _specs_to_groups(
+    specs: List[Dict[str, Any]],
+    start_rg_num: int,
+    window_rounds: List[Dict[str, Any]],
+    *,
+    oversize: bool,
+    cfg: Optional[Dict[str, Any]],
+    now_round: Optional[int],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """把 caller 产出的 GroupSpec 落成 round_groups 项（分配 rg_id + 校验区间 + 封档）。
+
+    - rg_id 从 start_rg_num 单调递增（接在回滚点保留组之后；mcp 注解「重编号 = 组内
+      展示软号重排，不碰硬 round_id」）。
+    - round_range 取 spec.round_start/end（int）；越界本批窗口轮 → 记错（触发兜底）。
+    - tier 默认 full（分级在批3 接线）。token_est 由窗口轮汇总，供 force_seal 判 token。
+    - force_seal_check 任一达标 → sealed=True；oversize 批强制单组 + 强制 sealed。
+    返回 (groups, errors)。
+    """
+    errors: List[str] = []
+    win_ints = {int(r["round_int"]) for r in window_rounds}
+    win_min = min(win_ints) if win_ints else None
+    win_max = max(win_ints) if win_ints else None
+
+    # token 汇总：按 round_int → token_est，便于按组区间求和
+    tok_by_round = {int(r["round_int"]): int(r.get("token_est", 0) or 0)
+                    for r in window_rounds}
+
+    groups: List[Dict[str, Any]] = []
+    n = start_rg_num
+    for i, sp in enumerate(specs):
+        if not isinstance(sp, dict):
+            errors.append(f"spec[{i}] 非 dict")
+            continue
+        s = _coerce_round_int(sp.get("round_start"))
+        e = _coerce_round_int(sp.get("round_end"))
+        if s is None or e is None or s > e:
+            errors.append(f"spec[{i}] round 区间非法: start={sp.get('round_start')} "
+                          f"end={sp.get('round_end')}")
+            continue
+        if win_min is not None and (s < win_min or e > win_max):
+            errors.append(f"spec[{i}] 区间[{s},{e}]越界窗口[{win_min},{win_max}]")
+            continue
+        tok_sum = sum(v for rk, v in tok_by_round.items() if s <= rk <= e)
+        g: Dict[str, Any] = {
+            "rg_id": format_rg_id(n),
+            "round_range": [s, e],
+            "tier": TIER_FULL,
+            "sealed": False,
+            "legacy_rg": False,
+            "full_text": sp.get("full_text") or "",
+            "summary_text": sp.get("summary_text") or "",
+            "title": sp.get("title") or "",
+            "token_est": int(tok_sum),
+        }
+        # 强制封档：oversize 巨轮组 / 达硬阈值
+        if oversize or force_seal_check(g, cfg, now_round=now_round):
+            g["sealed"] = True
+        groups.append(g)
+        n += 1
+
+    if oversize and len(groups) > 1:
+        # 巨轮 step fallback 约定：oversize 批应只产 1 个组；多于 1 视为 caller 违约
+        errors.append(f"oversize 批产出 {len(groups)} 组（应单组）")
+
+    return groups, errors
+
+
+def compose_record(
+    checkpoints_dir: str,
+    window_key: str,
+    messages: List[Dict[str, Any]],
+    prev_state: Optional[Dict[str, Any]],
+    llm_caller,
+    cfg: Optional[Dict[str, Any]] = None,
+    *,
+    now_round: Optional[int] = None,
+    rollback_count: Optional[int] = None,
+    logger: Optional[logging.Logger] = None,
+) -> ComposeResult:
+    """D3 核心：round-group 确定性增量聚合（照 mcp selectLocalComposeBoundary）。
+
+    **确定性回滚重写窗口**（代码算，不问模型）：
+      1. messages 按 round_id 聚合成有序轮；消费 last_grouped 锚做增量起点，
+         只取「水位之后的新增未聚合轮」。
+      2. 代码回滚最后 N 个【可回滚】组（默认 1；尾组短 + 新增≥10 → 2；已 sealed/legacy
+         组绝不回滚）。重写窗口 = 回滚组覆盖轮 + 新增未聚合轮。
+      3. 模型只在窗口内重新分段（按预算切批后调 llm_caller 产 GroupSpec），**绝不逐轮问**。
+      4. 新组 force_seal 强制收敛 + validate 门禁（复用批1a）+ 候选隔离写（复用批1a）。
+
+    返回 ComposeResult。无新增轮 → wrote=False 不变；LLM 失败 / 门禁拒收 → wrote=False
+    + fallback/errors，**维持未分组态**（回传未改动 prev round_groups，绝不破坏已有状态）。
+    """
+    log = logger or _DEFAULT_LOGGER
+    prev_state = prev_state or {}
+    prev_groups = [g for g in (prev_state.get("round_groups") or [])
+                   if isinstance(g, dict)]
+    prev_last_rg = prev_state.get("last_grouped_rg_id")
+    existing_md = read_record(checkpoints_dir, window_key)
+
+    def _unchanged(
+        errors: Optional[List[str]] = None,
+        *,
+        fallback: bool = False,
+        cooldown: bool = False,
+    ) -> ComposeResult:
+        cd = None
+        if cooldown:
+            import time as _t
+            cd = _t.time() + _cfg_int(cfg, "rg_cooldown_s", DEFAULT_RG_COOLDOWN_S)
+        return ComposeResult(
+            wrote=False,
+            round_groups=prev_groups,
+            last_grouped_rg_id=prev_last_rg,
+            record_md=existing_md,
+            errors=errors,
+            fallback=fallback,
+            cooldown_until=cd,
+        )
+
+    # ---- 1) 轮聚合 + 增量起点 ----
+    rounds = _rounds_from_messages(messages)
+    if not rounds:
+        return _unchanged()
+    watermark = _grouped_round_watermark(prev_state)
+    new_rounds = [r for r in rounds
+                  if watermark is None or r["round_int"] > watermark]
+    if not new_rounds:
+        return _unchanged()  # 无新增未聚合轮
+
+    # ---- 2) 确定性划回滚窗口 ----
+    prefix, rollbackable = _partition_groups(prev_groups)
+    if rollback_count is None:
+        rb = _decide_rollback_count(rollbackable, len(new_rounds), cfg)
+    else:
+        rb = max(0, min(int(rollback_count), len(rollbackable)))
+    rolled = rollbackable[-rb:] if rb > 0 else []
+    kept = prefix + (rollbackable[:len(rollbackable) - rb] if rb > 0 else rollbackable)
+
+    # 窗口起点：被回滚组的最小起点；无回滚则纯新增（水位 + 1）
+    window_start = None
+    if rolled:
+        starts = [_coerce_round_int((g.get("round_range") or [None])[0]) for g in rolled]
+        starts = [x for x in starts if x is not None]
+        if starts:
+            window_start = min(starts)
+    if window_start is None:
+        window_start = new_rounds[0]["round_int"]
+
+    window_rounds = [r for r in rounds if r["round_int"] >= window_start]
+    if not window_rounds:
+        return _unchanged()
+
+    # ---- 3) 预算切批 + 模型窗内分段（绝不逐轮问）----
+    batches = _split_window_into_batches(window_rounds, cfg)
+    start_rg_num = _next_rg_num(kept)
+    new_window_groups: List[Dict[str, Any]] = []
+    now_r = now_round if now_round is not None else window_rounds[-1]["round_int"]
+
+    for batch in batches:
+        b_rounds = batch["rounds"]
+        ok, specs = _call_llm_with_retry(llm_caller, b_rounds, cfg, log)
+        if not ok:
+            log.warning(f"[RECORD] compose 批失败兜底 {window_key}: 维持未分组态")
+            return _unchanged(["llm_failed"], fallback=True, cooldown=True)
+        g_list, g_errs = _specs_to_groups(
+            specs, start_rg_num + len(new_window_groups), b_rounds,
+            oversize=batch["oversize"], cfg=cfg, now_round=now_r,
+        )
+        if g_errs:
+            log.warning(f"[RECORD] compose spec 落组失败 {window_key}: {g_errs}")
+            return _unchanged(g_errs, fallback=True)
+        new_window_groups.extend(g_list)
+
+    if not new_window_groups:
+        return _unchanged(["no_groups"], fallback=True)
+
+    new_round_groups = kept + new_window_groups
+
+    # ---- 4) validate 门禁（针对窗口新组，effective_prev 水位降到回滚点之前）----
+    effective_prev = {
+        "round_groups": kept,
+        "last_grouped_rg_id": kept[-1]["rg_id"] if kept else None,
+    }
+    ok, errs = validate_composed_record(new_window_groups, effective_prev)
+    if not ok:
+        log.warning(f"[RECORD] compose 门禁拒收 {window_key}: {errs}")
+        return _unchanged(errs)
+
+    # ---- 5) 渲染 + 候选隔离写 ----
+    record_md = render_record_md(new_round_groups)
+    wrote_ok, w_errs = write_record_atomic(
+        checkpoints_dir, window_key, record_md,
+        effective_prev, candidate_index=new_window_groups, logger=log,
+    )
+    if not wrote_ok:
+        return _unchanged(w_errs)
+
+    last_rg = new_round_groups[-1]["rg_id"] if new_round_groups else prev_last_rg
+    log.info(
+        f"[RECORD] compose 成功 {window_key}: kept={len(kept)} "
+        f"new={len(new_window_groups)} rollback={rb} last_grouped={last_rg}"
+    )
+    return ComposeResult(
+        wrote=True,
+        round_groups=new_round_groups,
+        last_grouped_rg_id=last_rg,
+        record_md=record_md,
+    )
+
+
+def _next_rg_num(kept_groups: List[Dict[str, Any]]) -> int:
+    """新组 rg_id 起始编号 = 保留组中最大 rg 号 + 1（无则从 1 起）。"""
+    mx = 0
+    for g in kept_groups:
+        n = parse_rg_id(g.get("rg_id"))
+        if n > mx:
+            mx = n
+    return mx + 1
+
+
+# ========================
 # M1 RecordStore（地基薄封装：把 checkpoints_dir 绑定到实例，方法转发上面纯函数）
 # ========================
 class RecordStore:
@@ -609,3 +1200,36 @@ class RecordStore:
             generation=generation,
             logger=self.logger,
         )
+
+    # ---- 批2a：确定性聚合 / 强制收敛 ----
+    def compose_record(
+        self,
+        window_key: str,
+        messages: List[Dict[str, Any]],
+        prev_state: Optional[Dict[str, Any]],
+        llm_caller,
+        cfg: Optional[Dict[str, Any]] = None,
+        *,
+        now_round: Optional[int] = None,
+        rollback_count: Optional[int] = None,
+    ) -> "ComposeResult":
+        return compose_record(
+            self.checkpoints_dir,
+            window_key,
+            messages,
+            prev_state,
+            llm_caller,
+            cfg,
+            now_round=now_round,
+            rollback_count=rollback_count,
+            logger=self.logger,
+        )
+
+    @staticmethod
+    def force_seal_check(
+        group: Dict[str, Any],
+        cfg: Optional[Dict[str, Any]] = None,
+        *,
+        now_round: Optional[int] = None,
+    ) -> bool:
+        return force_seal_check(group, cfg, now_round=now_round)

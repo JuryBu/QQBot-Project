@@ -266,7 +266,12 @@ def _recover_number_source_after_corruption(
 
 # message-level v2 字段终态默认值（S3 一次定到 v2 终态，含 S4-S7 占位）
 # S3 实际写值的：round_id/step_id/first_reply/timestamp/receive_seq/message_id/
-#               sender/has_multimodal；其余（compressed/rg_id/recalled）留默认。
+#               sender/has_multimodal；其余（compressed/recalled）留默认。
+# S4 D4（批2a）：**砍掉 message.rg_id 字段**——组归属不回填到每条 message，改为按
+#   round_id 区间从 record_state.round_groups / record.index sidecar 推断（mcp 本来也
+#   不回填原始消息）。回填会与并发 merge-save 抢数组（重蹈批3.5 号源回退坑），聚合失败
+#   时 rg_id 留 None 又让分级/召回悬空。grep 确认除占位与单测断言外无任何 message.rg_id
+#   消费方，砍除安全。
 _MESSAGE_V2_DEFAULTS = {
     "round_id": None,
     "step_id": None,
@@ -276,7 +281,6 @@ _MESSAGE_V2_DEFAULTS = {
     "sender": None,
     "has_multimodal": False,
     "compressed": False,
-    "rg_id": None,
     "recalled": False,
 }
 
