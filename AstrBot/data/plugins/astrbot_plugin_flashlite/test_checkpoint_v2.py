@@ -61,7 +61,7 @@ def test_create_empty_t_file():
     """测试空 T 文件创建"""
     print("🧪 test_create_empty_t_file")
     t = _create_empty_t_file("GroupMessage:<GROUP_B>")
-    assert t["version"] == 1
+    assert t["version"] == 2  # S3 F1.1: schema 升 v2
     assert t["window_key"] == "GroupMessage:<GROUP_B>"
     assert t["window_type"] == "group"
     assert t["window_id"] == "<GROUP_B>"
@@ -121,7 +121,7 @@ async def test_load_save():
 
         # 1. 加载不存在的文件 → 应创建空 T
         t = await mgr.load("GroupMessage:12345")
-        assert t["version"] == 1
+        assert t["version"] == 2  # S3 F1.1: schema 升 v2
         assert t["window_key"] == "GroupMessage:12345"
         assert t["messages"] == []
 
@@ -142,7 +142,7 @@ async def test_load_save():
         with open(fp, "w") as f:
             f.write("{invalid json!!")
         t3 = await mgr.load("GroupMessage:12345")
-        assert t3["version"] == 1
+        assert t3["version"] == 2  # S3 F1.1: schema 升 v2
         assert t3["messages"] == []  # 回退到空 T
 
     checkpoint.CHECKPOINTS_DIR = old_dir

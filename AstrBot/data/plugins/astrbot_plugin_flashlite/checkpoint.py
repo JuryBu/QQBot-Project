@@ -26,6 +26,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import aiosqlite
 from astrbot.api import logger
 
+# S3 F1.3: 划轮状态机（唯一取号入口）。同目录纯逻辑模块，无 astrbot 依赖。
+# 兼容两种导入：包内 `from .` 与测试/直跑时的顶层 `import`。
+try:
+    from . import round_tracker
+except ImportError:
+    import round_tracker
+
 # ========================
 # Token 估算参数
 # ========================
@@ -110,7 +117,8 @@ def _create_empty_t_file(window_key: str) -> dict:
 
     now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     return {
-        "version": 1,
+        # S3 F1.1: schema v2（引入 round_id/step_id 锚点体系 + 取号号源）
+        "version": 2,
         "window_key": window_key,
         "window_type": window_type,
         "window_id": window_id,
@@ -130,8 +138,95 @@ def _create_empty_t_file(window_key: str) -> dict:
             "total_messages_ever": 0,
             "total_compressions": 0,
             "avg_compression_ratio": 0.0,
+            # S3 F1.1: 取号号源（唯一取号入口 round_tracker.assign_round 就地 +1）
+            "next_round_id": 1,
+            "next_step_id": 1,
+            # S3 占位状态字典（S4/S5/S6 消费，S3 留空）
+            "record_state": {"last_compressed_round_id": None},
+            "bpc_state": {},
+            "concurrency_state": {},
         },
     }
+
+
+# ========================
+# S3 F1.1: schema v1 → v2 迁移
+# ========================
+
+# message-level v2 字段终态默认值（S3 一次定到 v2 终态，含 S4-S7 占位）
+# S3 实际写值的：round_id/step_id/first_reply/timestamp/receive_seq/message_id/
+#               sender/has_multimodal；其余（compressed/rg_id/recalled）留默认。
+_MESSAGE_V2_DEFAULTS = {
+    "round_id": None,
+    "step_id": None,
+    "first_reply": False,
+    "receive_seq": 0,
+    "message_id": None,
+    "sender": None,
+    "has_multimodal": False,
+    "compressed": False,
+    "rg_id": None,
+    "recalled": False,
+}
+
+# metadata-level v2 新增字段默认值（迁移 / 兜底补齐共用）
+_METADATA_V2_DEFAULTS = {
+    "next_round_id": 1,
+    "next_step_id": 1,
+    "record_state": {"last_compressed_round_id": None},
+    "bpc_state": {},
+    "concurrency_state": {},
+}
+
+
+def _ensure_message_v2_fields(msg: dict, *, legacy: bool = False) -> dict:
+    """为单条 message 补齐 v2 终态字段（已有字段不覆盖）。
+
+    legacy=True 时（迁移旧消息）额外标 ``legacy=True``，且 round_id/step_id
+    永久留 None（约束 5：不回填旧消息号，不重建历史）。
+    """
+    for k, default in _MESSAGE_V2_DEFAULTS.items():
+        if k not in msg:
+            msg[k] = default
+    if legacy and "legacy" not in msg:
+        msg["legacy"] = True
+    return msg
+
+
+def _ensure_metadata_v2_fields(metadata: dict) -> dict:
+    """为 metadata 补齐 v2 新增字段（已有字段保留，如 dangling_repair_history）。"""
+    import copy
+    for k, default in _METADATA_V2_DEFAULTS.items():
+        if k not in metadata:
+            metadata[k] = copy.deepcopy(default)
+    return metadata
+
+
+def _migrate_v1_to_v2(data: dict) -> dict:
+    """v1 → v2 迁移：绝不重建，保留所有旧消息（约束 5：重建=蒸发历史）。
+
+    - 旧 messages 每条补 v2 字段，round_id/step_id 永久 None，标 legacy=True。
+      旧消息号不回填（next_round_id 从 1 起算，旧消息 round_id 永久 None）。
+    - metadata 补 next_round_id=1/next_step_id=1/record_state/bpc_state/
+      concurrency_state（已有的不覆盖，如 dangling_repair_history 保留）。
+    - 设 version=2。
+    """
+    migrated = 0
+    for msg in data.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
+        _ensure_message_v2_fields(msg, legacy=True)
+        migrated += 1
+
+    metadata = data.setdefault("metadata", {})
+    _ensure_metadata_v2_fields(metadata)
+
+    data["version"] = 2
+    logger.warning(
+        f"[T-FILE] schema v1→v2 迁移完成: {data.get('window_key', '?')} "
+        f"保留旧消息 {migrated} 条（round_id 永久 None/legacy），next_round_id=1"
+    )
+    return data
 
 
 # ========================
@@ -426,7 +521,10 @@ class TFileManager:
             return
         async with self._get_lock(window_key):
             t_file = await self.load(window_key)
-            t_file = self._append_messages_inner(t_file, pending)
+            # 路径 A（buffer flush）：真持久化 → 取号
+            t_file = self._append_messages_inner(
+                t_file, pending, window_key=window_key, assign_numbers=True
+            )
             await self.save(window_key, t_file)
 
     def _get_lock(self, window_key: str) -> asyncio.Lock:
@@ -462,10 +560,18 @@ class TFileManager:
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # 版本兼容检查
-            if data.get("version") != 1:
-                logger.warning(f"[T-FILE] 版本不匹配({data.get('version')})，重新创建")
-                data = _create_empty_t_file(window_key)
+            # S3 F1.1: 版本兼容检查 —— v1 自动迁移到 v2（绝不重建，约束 5）
+            version = data.get("version")
+            if version == 1:
+                data = _migrate_v1_to_v2(data)
+                await self.save(window_key, data)
+            elif version != 2:
+                # 未知版本（既非 1 也非 2）：保守起见仅补齐 metadata，不删消息
+                logger.warning(
+                    f"[T-FILE] 未知版本({version})，补齐 metadata v2 字段后沿用"
+                )
+                _ensure_metadata_v2_fields(data.setdefault("metadata", {}))
+                data["version"] = 2
                 await self.save(window_key, data)
 
             return self._merge_buffer(window_key, data)
@@ -485,10 +591,18 @@ class TFileManager:
             return self._merge_buffer(window_key, t_file)
 
     def _merge_buffer(self, window_key: str, t_file: dict) -> dict:
-        """将内存缓冲区中的消息合并到 T 文件数据中（纯内存，不写盘）"""
+        """将内存缓冲区中的消息合并到 T 文件数据中（纯内存，不写盘，只读视图）。
+
+        S3 约束 1：本路径**绝不取号**（assign_numbers=False）。merge 只为构建
+        load() 的临时视图（供 _extract_new_messages 比对 / build_llm_contexts），
+        这批 buffer 消息的真号在 flush_buffer 时才唯一分配；若此处取号，同一条
+        buffer 消息每次 load 都会重号。
+        """
         pending = self._msg_buffer.get(window_key, [])
         if pending:
-            t_file = self._append_messages_inner(t_file, pending)
+            t_file = self._append_messages_inner(
+                t_file, pending, window_key=window_key, assign_numbers=False
+            )
         return t_file
 
     async def save(self, window_key: str, t_file: dict) -> None:
@@ -540,7 +654,10 @@ class TFileManager:
 
         async with self._get_lock(window_key):
             t_file = await self.load(window_key)
-            t_file = self._append_messages_inner(t_file, new_messages)
+            # 公开 API（真持久化）：取号
+            t_file = self._append_messages_inner(
+                t_file, new_messages, window_key=window_key, assign_numbers=True
+            )
             await self.save(window_key, t_file)
 
         return t_file
@@ -550,22 +667,50 @@ class TFileManager:
     ) -> dict:
         """追加新消息到 T 文件（无锁版本）。
 
-        供事务链内部调用（调用方已持有窗口锁）。
+        供事务链内部调用（调用方已持有窗口锁，路径 B：on_llm_request extract）。
         注意：调用方必须自行调用 save() 持久化。
         返回更新后的 t_file（内存中）。
+        S3 F1.3：真持久化路径 → 取号（与路径 A buffer flush 合流到唯一入口）。
         """
         if not new_messages:
             return t_file
-        return self._append_messages_inner(t_file, new_messages)
+        return self._append_messages_inner(
+            t_file, new_messages, window_key=window_key, assign_numbers=True
+        )
 
     def _append_messages_inner(
-        self, t_file: dict, new_messages: List[dict]
+        self,
+        t_file: dict,
+        new_messages: List[dict],
+        *,
+        window_key: Optional[str] = None,
+        assign_numbers: bool = False,
     ) -> dict:
-        """追加消息的核心逻辑（纯内存操作，无锁无IO）。"""
-        now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        """追加消息的核心逻辑（纯内存操作 + 可选取号，无 asyncio 锁）。
+
+        S3 F1.2/F1.3：本函数是「唯一取号入口」。
+          - assign_numbers=True（真持久化路径：flush_buffer / _append_messages_unlocked
+            / append_messages）：load_state → 逐条 round_tracker.assign_round →
+            把 round_id/step_id/first_reply 写进 message v2 字段 → save_state；
+            号源 metadata.next_round_id/next_step_id 由 assign_round 就地 +1，
+            随 t_file save 持久化。
+          - assign_numbers=False（只读合并视图：_merge_buffer）：绝不取号
+            （否则同一条 buffer 消息每次 load 都重号），round_id/step_id 留 None。
+
+        约束 1：buffer flush（路径 A）与 extract（路径 B）必须合流到本函数取号，
+        防双号 / 跳号 / 倒序。
+        """
+        now_iso_ms = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
+
+        # 取号准备：仅真持久化路径加载 state，确保 metadata v2 号源就位
+        state = None
+        if assign_numbers and window_key:
+            state = round_tracker.load_state(CHECKPOINTS_DIR, window_key)
+            metadata = t_file.setdefault("metadata", {})
+            _ensure_metadata_v2_fields(metadata)
 
         for msg in new_messages:
-            # 构建存储格式
+            # ---- 构建 v2 存储格式 ----
             stored_msg = {
                 "role": msg.get("role", "user"),
             }
@@ -582,16 +727,53 @@ class TFileManager:
             if msg.get("tool_call_id"):
                 stored_msg["tool_call_id"] = msg["tool_call_id"]
 
-            # 时间戳
-            stored_msg["timestamp"] = msg.get("timestamp", now_iso)
+            # 时间戳（v2 升毫秒；保留已带的 timestamp）
+            stored_msg["timestamp"] = msg.get("timestamp", now_iso_ms)
 
-            # 元数据（如果有）
+            # 元数据（如果有，S1 sender_qq 兼容字段）
             if msg.get("meta"):
                 stored_msg["meta"] = msg["meta"]
+
+            # ---- v2 终态字段（F1.2）：先铺默认，再从传入 msg 取已知值 ----
+            _ensure_message_v2_fields(stored_msg, legacy=False)
+            # receive_seq / message_id / sender 由上游 buffer（F3.1）填，
+            # 本批未铺路则留默认（0 / None / None）。
+            if msg.get("receive_seq") is not None:
+                stored_msg["receive_seq"] = msg["receive_seq"]
+            if msg.get("message_id") is not None:
+                stored_msg["message_id"] = msg["message_id"]
+            if msg.get("sender") is not None:
+                stored_msg["sender"] = msg["sender"]
+            if msg.get("has_multimodal") is not None:
+                stored_msg["has_multimodal"] = bool(msg.get("has_multimodal"))
+
+            # ---- F1.3 取号：唯一入口，仅真持久化路径执行 ----
+            if state is not None:
+                assigned = round_tracker.assign_round(
+                    stored_msg,
+                    state,
+                    metadata,
+                    now_ts=time.time(),
+                    msg_tokens=estimate_context_msg_tokens(stored_msg),
+                    # round_max_steps/tokens：F6 配置键未建，暂用默认 30/8000
+                    round_max_steps=round_tracker.DEFAULT_ROUND_MAX_STEPS,
+                    round_max_tokens=round_tracker.DEFAULT_ROUND_MAX_TOKENS,
+                )
+                stored_msg["round_id"] = assigned["round_id"]
+                stored_msg["step_id"] = assigned["step_id"]
+                stored_msg["first_reply"] = assigned["first_reply"]
 
             t_file["messages"].append(stored_msg)
 
         t_file["metadata"]["total_messages_ever"] += len(new_messages)
+
+        # ---- 取号后持久化 state（metadata 随 t_file save 落盘）----
+        if state is not None and window_key:
+            try:
+                round_tracker.save_state(CHECKPOINTS_DIR, window_key, state)
+            except Exception as e:
+                logger.error(f"[T-FILE] state.json 保存失败 {window_key}: {e}")
+
         return t_file
 
     # ========================
