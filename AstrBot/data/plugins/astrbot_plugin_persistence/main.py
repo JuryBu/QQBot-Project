@@ -111,7 +111,10 @@ class PersistencePlugin(Star):
                 extra_data TEXT,
                 is_recalled INTEGER DEFAULT 0,
                 recalled_at TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
+                round_id TEXT,
+                step_id TEXT,
+                receive_seq INTEGER
             )
         """)
 
@@ -121,6 +124,18 @@ class PersistencePlugin(Star):
             logger.info("数据库迁移：已添加 extra_data 列")
         except Exception:
             pass  # 列已存在
+
+        # === F4.1 迁移：为旧表补 round_id/step_id/receive_seq 列（S4 rebuild 前提）===
+        # 幂等：先 PRAGMA table_info 查现有列，缺哪列才 ALTER，防重复迁移报 duplicate column。
+        # 旧行这三列留 NULL（不影响现有查询）；S4 rebuild 用 (created_at_ms, receive_seq) 排序回填。
+        await self._migrate_add_columns(
+            "qq_messages",
+            {
+                "round_id": "TEXT",
+                "step_id": "TEXT",
+                "receive_seq": "INTEGER",
+            },
+        )
 
         # 创建 CHECKPOINT 压缩历史表
         await self._db.execute("""
@@ -157,6 +172,36 @@ class PersistencePlugin(Star):
 
         await self._db.commit()
         logger.info("数据库表结构初始化完成")
+
+    async def _migrate_add_columns(self, table: str, columns: Dict[str, str]):
+        """幂等迁移：为已有表补列。
+
+        用 PRAGMA table_info 读出当前列集合，只对缺失的列执行 ALTER TABLE ADD COLUMN，
+        避免对已迁移过的库重复 ALTER 报 "duplicate column name"。
+
+        Args:
+            table: 目标表名（须为可信常量，不接受外部输入）
+            columns: {列名: SQLite 类型}，新增列均为 NULL 允许（无 NOT NULL/DEFAULT）
+        """
+        try:
+            cursor = await self._db.execute(f"PRAGMA table_info({table})")
+            rows = await cursor.fetchall()
+            existing = {row[1] for row in rows}  # row[1] = 列名
+        except Exception as e:
+            logger.error(f"读取表 {table} 结构失败，跳过迁移: {e}")
+            return
+
+        for col, col_type in columns.items():
+            if col in existing:
+                continue
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"
+                )
+                logger.info(f"数据库迁移：已为 {table} 添加 {col} 列 ({col_type})")
+            except Exception as e:
+                # 并发/竞态下列可能已存在，幂等吞掉
+                logger.debug(f"为 {table} 添加 {col} 列失败（可能已存在）: {e}")
 
     # ========================
     # 消息拦截（最高优先级）
@@ -233,6 +278,9 @@ class PersistencePlugin(Star):
             content_raw = self._safe_serialize_raw(raw)
 
             # 放入写入队列（非阻塞）
+            # F4.1: created_at 升毫秒 (.%f) + receive_seq 单调列(time.time_ns())防同毫秒乱序。
+            # round_id/step_id 暂留 NULL（persistence 拦截原始 QQ 消息无 flashlite round_id，
+            # 由 S4 rebuild 用 (created_at_ms, receive_seq) 排序回填）。
             record = {
                 "window_type": window_type,
                 "window_id": window_id,
@@ -244,7 +292,10 @@ class PersistencePlugin(Star):
                 "has_image": 1 if has_image else 0,
                 "image_urls": json.dumps(image_urls, ensure_ascii=False) if image_urls else None,
                 "extra_data": json.dumps(extra_data, ensure_ascii=False) if extra_data else None,
-                "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f"),
+                "round_id": None,
+                "step_id": None,
+                "receive_seq": time.time_ns(),
             }
 
             try:
@@ -582,13 +633,19 @@ class PersistencePlugin(Star):
                 inserts = [r for op, r in batch if op == "insert"]
                 recalls = [r for op, r in batch if op == "recall"]
 
+                # F4.1: 落盘前按 receive_seq 排序，防同毫秒/乱序入队破坏 rebuild 顺序。
+                # 旧记录可能无 receive_seq（理论上本批都是新写入，兜底用 0）。
+                inserts.sort(key=lambda r: r.get("receive_seq") or 0)
+
                 if inserts:
                     await self._db.executemany(
-                        """INSERT INTO qq_messages 
+                        """INSERT INTO qq_messages
                            (window_type, window_id, message_id, sender_id, sender_name,
-                            content_text, content_raw, has_image, image_urls, extra_data, created_at)
+                            content_text, content_raw, has_image, image_urls, extra_data, created_at,
+                            round_id, step_id, receive_seq)
                            VALUES (:window_type, :window_id, :message_id, :sender_id, :sender_name,
-                                   :content_text, :content_raw, :has_image, :image_urls, :extra_data, :created_at)
+                                   :content_text, :content_raw, :has_image, :image_urls, :extra_data, :created_at,
+                                   :round_id, :step_id, :receive_seq)
                         """,
                         inserts,
                     )
@@ -640,14 +697,19 @@ class PersistencePlugin(Star):
             inserts = [r for op, r in remaining if op == "insert"]
             recalls = [r for op, r in remaining if op == "recall"]
 
+            # F4.1: 退出路径同样按 receive_seq 排序后补列写入，与 _batch_writer 保持一致。
+            inserts.sort(key=lambda r: r.get("receive_seq") or 0)
+
             try:
                 if inserts:
                     await self._db.executemany(
-                        """INSERT INTO qq_messages 
+                        """INSERT INTO qq_messages
                            (window_type, window_id, message_id, sender_id, sender_name,
-                            content_text, content_raw, has_image, image_urls, extra_data, created_at)
+                            content_text, content_raw, has_image, image_urls, extra_data, created_at,
+                            round_id, step_id, receive_seq)
                            VALUES (:window_type, :window_id, :message_id, :sender_id, :sender_name,
-                                   :content_text, :content_raw, :has_image, :image_urls, :extra_data, :created_at)
+                                   :content_text, :content_raw, :has_image, :image_urls, :extra_data, :created_at,
+                                   :round_id, :step_id, :receive_seq)
                         """,
                         inserts,
                     )
