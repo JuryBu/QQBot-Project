@@ -188,6 +188,145 @@ def build_compress_prompt(
 {messages_text}"""
 
 
+# ========================
+# S3 F1.5: dangling tool_calls 防御（C1 critical）
+# ========================
+
+# 占位 tool result 的默认文案（Q4 决策：人话 + system prompt 引导）
+DANGLING_TOOL_PLACEHOLDER = "[工具结果丢失：系统重启/中断]"
+
+
+def _repair_tool_call_pairs(
+    contexts: List[dict],
+    placeholder: str = DANGLING_TOOL_PLACEHOLDER,
+) -> Tuple[List[dict], List[dict]]:
+    """读侧 last-mile 防御：修复未配对的 tool_calls / tool 结果。
+
+    组请求体（OpenAI messages）末尾若有未配对的 assistant.tool_calls（缺对应
+    role=tool 结果），provider 会 400。崩溃重启 / 压缩切分会产生这种 dangling。
+    本函数无条件修复，保证输出永远满足「每个 assistant.tool_calls[*].id 都有
+    紧随其后的 role=tool 结果，且每个 role=tool 都有前序 assistant.tool_calls」。
+
+    算法（O(N) 一遍扫）：
+      - pending: tool_call_id -> 在 contexts 的 assistant 索引
+      - 遇 assistant 且有 tool_calls → 每个 tc.id 加入 pending
+      - 遇 role=tool → tool_call_id 在 pending 则弹出（配对成功）；
+        不在 pending → orphan（缺头，标记待删）
+      - 遍历完 pending 剩余 = dangling（assistant 发了 tool_calls 但无 tool 结果）
+
+    修复：
+      - dangling → 在该 assistant 消息之后（紧跟它原有的配对 tool 结果之后、
+        在下一条非该 assistant 衍生的消息之前）插入占位 role=tool
+      - orphan → 从输出删除
+
+    Args:
+        contexts: OpenAI 格式消息列表（不修改原 list，返回新 list）
+        placeholder: 占位 tool result 的 content 文案
+
+    Returns:
+        (修复后 contexts, 修复记录 list)
+        修复记录每条形如 {"type": "dangling_placeholder"|"orphan_dropped",
+                          "tool_call_id": ..., "position": ...}
+    """
+    if not contexts:
+        return contexts, []
+
+    # 第一遍扫描：识别 dangling 与 orphan
+    # pending[tcid] = assistant 在 contexts 中的索引
+    pending: Dict[str, int] = {}
+    # orphan_indices: role=tool 但无前序配对的索引集合（待删）
+    orphan_indices = set()
+
+    for idx, msg in enumerate(contexts):
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                if not isinstance(tc, dict):
+                    continue
+                tcid = tc.get("id")
+                if tcid:
+                    pending[tcid] = idx
+        elif role == "tool":
+            tcid = msg.get("tool_call_id")
+            if tcid in pending:
+                # 配对成功，弹出
+                pending.pop(tcid, None)
+            else:
+                # orphan：缺头（前无 assistant.tool_calls 发起，或重复结果）
+                orphan_indices.add(idx)
+
+    # 无任何修复需求 → 原样返回（不复制，零开销）
+    if not pending and not orphan_indices:
+        return contexts, []
+
+    repairs: List[dict] = []
+
+    # dangling: assistant_idx -> [缺失 tcid, ...]（保持发起顺序）
+    dangling_by_assistant: Dict[int, List[str]] = {}
+    for tcid, asst_idx in pending.items():
+        dangling_by_assistant.setdefault(asst_idx, []).append(tcid)
+
+    # 第二遍：重建输出 list
+    # - 跳过 orphan
+    # - 在每个 dangling assistant「衍生段」末尾插入占位
+    #   衍生段 = 该 assistant 消息本身 + 紧随其后的连续 role=tool 消息
+    repaired: List[dict] = []
+    n = len(contexts)
+    i = 0
+    while i < n:
+        if i in orphan_indices:
+            msg = contexts[i]
+            repairs.append({
+                "type": "orphan_dropped",
+                "tool_call_id": msg.get("tool_call_id") if isinstance(msg, dict) else None,
+                "position": i,
+            })
+            i += 1
+            continue
+
+        msg = contexts[i]
+        repaired.append(msg)
+
+        # 该位置是 dangling assistant → 把它的衍生 tool 段也搬过来，再补占位
+        if i in dangling_by_assistant:
+            missing_ids = dangling_by_assistant[i]
+            # 找出已配对的 tcid（该 assistant 的 tool_calls 里不在 missing 的）
+            j = i + 1
+            # 先把紧随其后的、属于该 assistant 的配对 tool 结果原样搬入
+            while j < n:
+                nxt = contexts[j]
+                if (
+                    isinstance(nxt, dict)
+                    and nxt.get("role") == "tool"
+                    and j not in orphan_indices
+                ):
+                    repaired.append(nxt)
+                    j += 1
+                else:
+                    break
+            # 在衍生段末尾补占位（每个缺失 tcid 一条）
+            for tcid in missing_ids:
+                placeholder_msg = {
+                    "role": "tool",
+                    "tool_call_id": tcid,
+                    "content": placeholder,
+                }
+                repaired.append(placeholder_msg)
+                repairs.append({
+                    "type": "dangling_placeholder",
+                    "tool_call_id": tcid,
+                    "position": i,
+                })
+            i = j
+            continue
+
+        i += 1
+
+    return repaired, repairs
+
+
 def serialize_messages_for_compress(messages: List[dict]) -> str:
     """将 OpenAI 格式消息列表序列化为压缩 prompt 用的文本"""
     lines = []
@@ -493,6 +632,28 @@ class TFileManager:
                 ctx_msg["tool_call_id"] = msg["tool_call_id"]
 
             contexts.append(ctx_msg)
+
+        # S3 F1.5: 读侧 last-mile dangling tool_calls 防御（C1 critical）
+        # 输出前无条件修复未配对的 tool_calls / tool 结果，防止 provider 400。
+        placeholder = DANGLING_TOOL_PLACEHOLDER
+        try:
+            placeholder = (t_file.get("metadata", {}) or {}).get(
+                "dangling_tool_placeholder_template"
+            ) or DANGLING_TOOL_PLACEHOLDER
+        except Exception:
+            placeholder = DANGLING_TOOL_PLACEHOLDER
+
+        contexts, repairs = _repair_tool_call_pairs(contexts, placeholder)
+        if repairs:
+            logger.warning(
+                f"[T-FILE] build_llm_contexts: dangling tool_calls 修复 "
+                f"{len(repairs)} 处 → {repairs}"
+            )
+            try:
+                meta = t_file.setdefault("metadata", {})
+                meta.setdefault("dangling_repair_history", []).extend(repairs)
+            except Exception as _re:
+                logger.debug(f"[T-FILE] dangling_repair_history 记录失败: {_re}")
 
         return contexts
 

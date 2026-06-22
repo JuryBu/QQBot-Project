@@ -25,6 +25,12 @@ try:
 except ImportError:
     from tool_registry import SANDBOX_ROOT
 
+# S3 F1.5: dangling tool_calls 读侧防御（约束4：fallback 路径同样要兜底防 400）
+try:
+    from .checkpoint import _repair_tool_call_pairs
+except ImportError:
+    from checkpoint import _repair_tool_call_pairs
+
 if TYPE_CHECKING:
     # 依赖契约（运行期由 FlashLiteEngine 主类经 self 提供，静态检查仅作提示）：
     #   方法：self._register_quoted_vars / self._persist_bot_reply / self._call_flash_lite
@@ -514,6 +520,16 @@ class ContextMixin:
                 "违反以上任何一条都是严重错误。"
             )
 
+            # S3 F1.5: dangling tool_calls 占位说明（Q4 决策：人话 + system 引导）
+            # 始终注入（静态文案，保持 KVCache 命中）：引导主模型遇到崩溃恢复占位时
+            # 正常回复、不要重试该工具，避免 ReAct 死循环。
+            inject_parts.append(
+                "## 工具结果占位说明\n"
+                "若上下文中出现『[工具结果丢失：系统重启/中断]』占位 "
+                "表示该工具调用因系统崩溃/重启未完成 "
+                "请基于用户最新输入正常回复 不要重试该工具。"
+            )
+
             # 0. 延迟持久化：从 conversation history 提取 bot 回复写入 persistence
             #    覆盖群聊 + 私聊，记录工具调用名称和工具执行结果
             try:
@@ -720,6 +736,23 @@ class ContextMixin:
                 except Exception as e:
                     logger.error(f"[T-FILE] {window_key}: 处理异常 {e}，保持原始 req.contexts")
                     t_file_active = False
+
+            # 3.5 S3 F1.5: fallback 路径 dangling tool_calls 防御（约束4 / C1 critical）
+            # T 文件未接管时（异常 fallback / window_key 缺失 / _t_file_mgr 未就绪），
+            # req.contexts 保持原始未修复值。读侧 last-mile 必须无条件兜底，
+            # 否则崩溃重启残留的未配对 tool_calls 会让 provider 整窗 400。
+            # （T 文件路径的 build_llm_contexts 已自带修复，此处仅兜 fallback。）
+            if not t_file_active and hasattr(req, "contexts") and req.contexts:
+                try:
+                    _repaired, _repairs = _repair_tool_call_pairs(req.contexts)
+                    if _repairs:
+                        req.contexts = _repaired
+                        logger.warning(
+                            f"[T-FILE] fallback 路径 dangling tool_calls 修复 "
+                            f"{len(_repairs)} 处 → {_repairs}"
+                        )
+                except Exception as _fe:
+                    logger.error(f"[T-FILE] fallback dangling 修复异常: {_fe}")
 
             # 4. 修复 Codex 问题3: 注入工具集说明（brief 模式）
             tool_section = self._agent_builder._build_tool_section("brief")
