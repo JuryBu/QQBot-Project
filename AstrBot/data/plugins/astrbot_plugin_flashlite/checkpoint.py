@@ -1117,11 +1117,17 @@ class TFileManager:
             await self.save(window_key, t_file)
             return t_file
 
-    async def load(self, window_key: str) -> dict:
+    async def load(self, window_key: str, *, merge_buffer: bool = True) -> dict:
         """加载 T 文件。不存在则创建空文件。
 
         如果文件损坏（JSON 解析失败），回退到空 T 并记录 error。
-        返回数据已包含内存缓冲区中的未刷盘消息。
+        merge_buffer=True（默认）：返回数据合并内存缓冲区中的未刷盘消息（**只读视图**用途，
+        如 _extract / build_llm_contexts）。这些 buffer 消息以 assign_numbers=False merge
+        进来，round_id 留 None——**绝不可被 save 回盘**（S4 批6 #2/#3/#7）。
+        merge_buffer=False：跳过 _merge_buffer，返回纯磁盘视图（**落盘路径**专用，如 compose
+        提交块 / 幂等迁移块 / flush_hit_queue）。这些路径 load→save 整份写盘，若 merge 了
+        未取号 buffer 消息，会把 round_id=None 持久化进 T 文件（_rounds_from_messages 永远
+        跳过 → 丢轮），且 buffer 未被 pop，下次 flush_buffer 重复落盘。故落盘前一律传 False。
 
         S3 F2.2：首次访问某窗口时按需触发崩溃恢复（replay WAL / gen 校验 / 自愈），
         恢复每窗口仅做一次（_recovered 集合去重），后续 load 走快路径。
@@ -1130,7 +1136,9 @@ class TFileManager:
         await self._recover_window_if_needed(window_key)
 
         data = await self._load_t_file_raw(window_key)
-        return self._merge_buffer(window_key, data)
+        if merge_buffer:
+            return self._merge_buffer(window_key, data)
+        return data
 
     async def _recover_window_if_needed(self, window_key: str) -> None:
         """S3 F2.2：某窗口首次访问时按需崩溃恢复（每窗口仅一次）。
@@ -1701,6 +1709,13 @@ class TFileManager:
             # D8 防空洞：想降档到 summary/brief 但该组处于 summary 空洞 → 强制 full。
             if tier != record.TIER_FULL and record.group_has_summary_gap(g, summary_wm):
                 tier = record.TIER_FULL
+            # S4 批6 #9：回写算出的 tier 进内存视图组对象（方案 b，不持久化磁盘）。
+            # 组 tier 字段原硬初始化为 'full' 且从不回写 → 滞回 prev_tier 恒为 full 失效。
+            # 这里把本次真实定档写回内存 dict，使「同一 t_file 视图被同轮内再次 build」时
+            # （如接力中止判据 build_llm_contexts(t_file) 二次读）滞回 prev 取到真实上次档。
+            # tier 是读时时变量（依赖 now_round/hit），仅作滞回 prev 参考、每次仍重算，
+            # 故不持久化到磁盘（避免锁外读路径回写 disk 快照与 compose 替换竞态，见 #9 验证）。
+            g["tier"] = tier
             body = record._select_tier_body(g, tier)
             if not body:
                 continue
@@ -1751,6 +1766,21 @@ class TFileManager:
             logger.debug(
                 f"[T-FILE] {window_key}: rebuild_index_if_stale best-effort 失败 {_se}"
             )
+
+        # ---- (d) 空视图 fallback（S4 批6 #6）：record 视图实质为空 → 触发全量 ----
+        # valid_groups 非空但所有组 tier 文本读不出（block_parts 全空）且无尾部原文
+        # （全部 message round_id <= watermark）时 contexts==[]。空 list != None 致
+        # build_llm_contexts 不 fallback，直接把上下文清空（违反 D1：fallback 应降级全量
+        # 而非清空）。这里把「文本读不出导致的空」并入 fallback 语义，返回 None 触发全量。
+        # 注意：返回 None 时上层走 _build_contexts_full；若真是全新空窗口（valid_groups 空）
+        # 已在前面 1671 行返回 None，不会走到这里；此处仅兜「有组但读空」的局部损坏态，
+        # 全量 fallback 也为空时上层不再二次 fallback（已在全量分支），无死循环。
+        if not contexts:
+            logger.warning(
+                f"[T-FILE] {window_key}: record 视图产出空"
+                f"（tier 文本全空且无尾部原文）→ fallback 全量"
+            )
+            return None
 
         return contexts
 
@@ -2060,7 +2090,9 @@ class TFileManager:
         # 幂等：已有 legacy_rg 组 / 无旧 T1 → 不产生变更、不重复迁移、不重压。
         async with seg_lock:
             async with self._get_lock(window_key):
-                disk_t = await self.load(window_key)
+                # S4 批6 #7：落盘路径用 merge_buffer=False，避免把未取号 buffer 消息
+                # （round_id=None）随 migrated save 持久化进 T 文件 + 下次 flush 重复落盘。
+                disk_t = await self.load(window_key, merge_buffer=False)
                 migrated, disk_t = self._migrate_legacy_t1_to_record_group(disk_t)
                 if migrated:
                     await self.save(window_key, disk_t)
@@ -2118,7 +2150,11 @@ class TFileManager:
             committed = False
             async with seg_lock:
                 async with self._get_lock(window_key):
-                    disk_t = await self.load(window_key)
+                    # S4 批6 #2：落盘路径用 merge_buffer=False。本提交块（含下方 disk-ahead
+                    # 作废分支的 save）会整份写盘 disk_t，若 merge 了未取号 buffer 消息，
+                    # round_id=None 被持久化（_rounds_from_messages 永远跳过 → 丢轮）且
+                    # buffer 未 pop，下次 flush_buffer 重复落盘。
+                    disk_t = await self.load(window_key, merge_buffer=False)
                     disk_meta = disk_t.setdefault("metadata", {})
                     disk_rec = disk_meta.setdefault("record_state", {})
 
@@ -2355,7 +2391,10 @@ class TFileManager:
                 # 再检查（进锁前可能被 compose 收尾清空）
                 if not self._hit_queue.get(window_key):
                     return 0
-                disk_t = await self.load(window_key)
+                # S4 批6 #3：落盘路径用 merge_buffer=False。本路径 applied>0 时 save 整份
+                # 写盘 disk_t；若 merge 未取号 buffer 消息（round_id=None），会随之持久化
+                # → 丢轮 + 下次 flush 重复落盘。hit 命中在活跃群常见，触发面比 compose 更广。
+                disk_t = await self.load(window_key, merge_buffer=False)
                 disk_meta = disk_t.setdefault("metadata", {})
                 disk_rec = disk_meta.setdefault("record_state", {})
                 applied = self._flush_hit_queue_into(disk_rec, window_key)

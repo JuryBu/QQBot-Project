@@ -486,9 +486,16 @@ def validate_composed_record(
                 f"({pe + 1}..{cs - 1})"
             )
 
-    # ---- 规则 5：与 prev_state 衔接（不回退覆盖已封档区间）----
+    # ---- 规则 5：与 prev_state 衔接（不回退覆盖 + 不前向漏轮）----
+    # 上界：候选首组不得回退覆盖已封档区间（first_s <= watermark 拒）。
+    # 下界（S4 批6 #1/#4/#5）：候选首组必须恰好接续水位（first_s == watermark+1），
+    # 否则 kept 末组(水位)与新窗口首组之间出现「前导/接缝空洞」——被漏轮落在新水位
+    # 之下、又不在任何 group 文本，消费侧 tail loop(rn<=watermark) 跳过 → 永久静默丢轮。
+    # 例外：kept 末组(水位锚)是 legacy_rg 历史冷冻段时，允许其后跳变（同规则4 legacy 豁免）。
     if prev_state and norm:
-        watermark = _grouped_round_watermark(prev_state)
+        watermark, tail_is_legacy = _grouped_round_watermark(
+            prev_state, with_legacy_flag=True
+        )
         if watermark is not None:
             first_rg, first_s, _fe, _fg = norm[0]
             if first_s <= watermark:
@@ -496,19 +503,30 @@ def validate_composed_record(
                     f"回退覆盖: 候选首组 {first_rg}(s={first_s}) "
                     f"<= 已聚合水位 round={watermark}"
                 )
+            elif first_s != watermark + 1 and not tail_is_legacy:
+                errors.append(
+                    f"接缝空洞: 已聚合水位 round={watermark} 与候选首组 "
+                    f"{first_rg}(s={first_s}) 之间缺轮 ({watermark + 1}..{first_s - 1})"
+                )
 
     return (len(errors) == 0), errors
 
 
-def _grouped_round_watermark(prev_state: Dict[str, Any]) -> Optional[int]:
+def _grouped_round_watermark(
+    prev_state: Dict[str, Any], *, with_legacy_flag: bool = False
+):
     """从 prev_state 推「已聚合到的 round 上界」（last_grouped 对应区间的终点 e）。
 
     优先用 round_groups 里 last_grouped_rg_id 对应组的 round_range[1]；
     退而求其次取 round_groups 中最大的 round_range[1]。无则 None（首次聚合，无水位）。
+
+    with_legacy_flag=True 时返回 (watermark, is_legacy_tail)：is_legacy_tail 标记
+    水位锚点组是否为 legacy_rg 历史冷冻段（供 validate 规则5 决定是否豁免接缝连续校验）。
+    默认 False 返回单个 watermark（向后兼容既有调用点）。
     """
     rg_list = prev_state.get("round_groups") or []
     if not isinstance(rg_list, list) or not rg_list:
-        return None
+        return (None, False) if with_legacy_flag else None
 
     last_grouped = prev_state.get("last_grouped_rg_id")
     parse = round_tracker.parse_round_id
@@ -527,20 +545,35 @@ def _grouped_round_watermark(prev_state: Dict[str, Any]) -> Optional[int]:
             return n if n >= 0 else None
         return None
 
+    wm: Optional[int] = None
+    is_legacy = False
+
     # last_grouped_rg_id 对应组的终点优先
     if last_grouped:
         for g in rg_list:
             if isinstance(g, dict) and g.get("rg_id") == last_grouped:
                 end = _end_of(g)
                 if end is not None:
-                    return end
+                    wm = end
+                    is_legacy = bool(g.get("legacy_rg"))
+                break
 
-    # 退化：取所有组终点的最大值
-    ends = [
-        _end_of(g) for g in rg_list
-        if isinstance(g, dict) and _end_of(g) is not None
-    ]
-    return max(ends) if ends else None
+    # 退化：取所有组终点的最大值（取该最大终点组的 legacy 标记）
+    if wm is None:
+        best_end: Optional[int] = None
+        best_g: Optional[Dict[str, Any]] = None
+        for g in rg_list:
+            if not isinstance(g, dict):
+                continue
+            end = _end_of(g)
+            if end is not None and (best_end is None or end > best_end):
+                best_end = end
+                best_g = g
+        if best_end is not None:
+            wm = best_end
+            is_legacy = bool(best_g.get("legacy_rg")) if best_g else False
+
+    return (wm, is_legacy) if with_legacy_flag else wm
 
 
 # ========================
@@ -829,7 +862,10 @@ def tier_for_group(
     cap_ord = _hit_upgrade_cap_ord(group)  # D10 封顶：文字线 full / 多模态原图线 summary
     final_ord = base_ord
     if score >= upgrade_thresh:
-        final_ord = min(base_ord + 1, cap_ord)  # 抬一档，封顶到拆线上限
+        # 只升不降（S4 批6 #8）：cap_ord 在多模态线为 summary(1)，当 base 已是 full(2)
+        # 时 min(base+1,cap)=1 会把命中（正信号）的年轻多模态组反而降档。外层 max(base_ord,…)
+        # 钳住下限，保证命中只升不降，与下方 D10 锁定分支(839)的 max 保护对称。
+        final_ord = max(base_ord, min(base_ord + 1, cap_ord))  # 抬一档，封顶到拆线上限
 
     # ---- ④ D10 命中锁定（hit_keep_rounds 滞回）：命中即锁定保持 N 轮不降 ----
     # hit_score 按时间衰减会在「相邻轮」掉回阈值下导致升档忽有忽无（横跳）。命中锁定
@@ -1638,6 +1674,34 @@ def compose_record(
     if not ok:
         log.warning(f"[RECORD] compose 门禁拒收 {window_key}: {errs}")
         return _unchanged(errs)
+
+    # ---- 4.5) 窗口全覆盖断言（S4 批6 #1/#4/#5 主门禁，对不可信 LLM 输出做代码侧硬保证）----
+    # 不依赖 LLM、不依赖 watermark 推导：用重写窗口的轮全集减去新组实际覆盖的轮集，
+    # 有差集即「漏轮」（前导/中段/尾段三类统一拦下）。validate 规则5 只兜首组接缝（下界），
+    # 此处兜整窗（含中段缺组未触发规则4 的边角）。漏轮 → 拒收走 _unchanged(fallback+cooldown)
+    # 维持未分组态：原文仍在消费侧 tail loop（watermark 未推进），绝不丢轮（D1 铁律）。
+    win_set = set()
+    for r in window_rounds:
+        ri = _coerce_round_int(r.get("round_int"))
+        if ri is not None:
+            win_set.add(ri)
+    cov = set()
+    for g in new_window_groups:
+        rr = g.get("round_range") or [None, None]
+        gs = _coerce_round_int(rr[0]) if len(rr) >= 2 else None
+        ge = _coerce_round_int(rr[1]) if len(rr) >= 2 else None
+        if gs is not None and ge is not None and gs <= ge:
+            cov |= set(range(gs, ge + 1))
+    missing = sorted(win_set - cov)
+    if missing:
+        log.warning(
+            f"[RECORD] compose 窗口未全覆盖 {window_key}: 漏轮 {missing}"
+            f"（window=[{min(win_set) if win_set else '?'}.."
+            f"{max(win_set) if win_set else '?'}]）→ 拒收维持未分组态"
+        )
+        return _unchanged(
+            [f"window_uncovered:{missing}"], fallback=True, cooldown=True
+        )
 
     # ---- 5) 渲染 + 候选隔离写 ----
     record_md = render_record_md(new_round_groups)
