@@ -669,7 +669,19 @@ class ContextMixin:
             if window_key and self._t_file_mgr:
                 try:
                     # === H-1 修复: 两阶段锁 ===
-                    
+
+                    # S3 F3.3 Phase1 第一件事: flush_buffer（注入前清空内存 buffer）
+                    # route_message 把每条 user 消息 buffer_message 进内存 buffer（易失，
+                    # 仅 WAL 兜底），尚未取号落盘。注入前若不先 flush，下面的
+                    # _extract_new_messages / build_llm_contexts 会漏掉这些未落盘 buffer
+                    # 消息 → 划轮缺号、record 漏条。flush_buffer 自带窗口锁且走唯一取号
+                    # 入口 _append_messages_inner（路径 A），故必须在下方 _get_lock 之前
+                    # 调用——它内部会再取同一把锁，嵌套会死锁。
+                    try:
+                        await self._t_file_mgr.flush_buffer(window_key)
+                    except Exception as _fbe:
+                        logger.warning(f"[T-FILE] {window_key}: Phase1 flush_buffer 异常 {_fbe}")
+
                     # Phase 1（锁内，毫秒级）: 原子化 load → extract → append → save
                     async with self._t_file_mgr._get_lock(window_key):
                         t_file = await self._t_file_mgr.load(window_key)
@@ -706,32 +718,64 @@ class ContextMixin:
                     t_file_active = True
                     logger.info(f"[T-FILE] {window_key}: req.contexts 已替换为 T 文件内容 ({len(req.contexts)} 条)")
 
-                    # 补录上一轮 assistant 回复到 T 文件
-                    # on_llm_request 在 LLM 调用之前运行，此时 req.contexts 中的
-                    # assistant 消息是上一轮的回复，需要追加到 T 文件确保不丢失
+                    # S3 F3.4: assistant 补录 fallback（防 on_llm_response 钩子失效漏录）
+                    # 主路径已前移到 on_llm_response 钩子（track_main_model_cost），
+                    # 回复送出那一刻立即 buffer_message → 锚点不再滞后一轮（设计§1.1）。
+                    # 但 on_llm_response 钩子只拿得到「最终那次」LLMResponse（最后一步
+                    # 纯文本 assistant），拿不到 run_context.messages 中的中间 ReAct step
+                    # （assistant.tool_calls + 配对 tool）。故这里保留「下次 on_llm_request
+                    # 从上一轮 contexts 反查」作为 fallback：
+                    #   (1) 补全 on_llm_response 没覆盖的中间 ReAct step；
+                    #   (2) on_llm_response 钩子整体失效时兜底补最终 assistant。
+                    # 关键（约束7 step 原子）：从「最后一条 assistant」起到 contexts 末尾
+                    # 视为一个完整 step（assistant[+tool_calls] + 后续所有配对 tool），
+                    # 一次性 append——绝不分两次落盘半个 step（崩溃→下次 provider 400）。
                     try:
                         t_msgs = t_file.get("messages", [])
                         last_t_role = t_msgs[-1].get("role") if t_msgs else None
-                        # 如果 T 文件最后一条不是 assistant，检查原始 contexts 中是否有
+                        # 仅当本轮 Phase1 未从 contexts 提取到新消息（new_msgs 已涵盖）、
+                        # 且 T 文件尾部不是 assistant（说明上一轮回复尚未落盘）才反查
                         if last_t_role != "assistant" and len(new_msgs) == 0:
-                            # 从原始 AstrBot contexts 中寻找最后的 assistant（非 T 文件内容）
-                            for _msg in reversed(_original_contexts):
-                                if _msg.get("role") == "assistant":
-                                    # 去重：仅与 T 文件最后一条 assistant 完全相同才跳过
-                                    _content = _msg.get("content", "")
-                                    _last_asst = next(
-                                        (m for m in reversed(t_msgs) if m.get("role") == "assistant"),
-                                        None
-                                    )
-                                    _is_dup = (_last_asst is not None and _last_asst.get("content") == _content)
-                                    if not _is_dup:
-                                        await self._t_file_mgr.append_messages(
-                                            window_key, [_msg]
-                                        )
-                                        logger.debug(f"[T-FILE] {window_key}: 补录上一轮 assistant 回复")
+                            # 定位 _original_contexts 中最后一个 assistant 的下标
+                            _last_asst_idx = -1
+                            for _i in range(len(_original_contexts) - 1, -1, -1):
+                                if _original_contexts[_i].get("role") == "assistant":
+                                    _last_asst_idx = _i
                                     break
+                            if _last_asst_idx >= 0:
+                                # 完整 step = 该 assistant + 其后所有 role=tool（配对结果）
+                                _step = [_original_contexts[_last_asst_idx]]
+                                for _sub in _original_contexts[_last_asst_idx + 1:]:
+                                    if _sub.get("role") == "tool":
+                                        _step.append(_sub)
+                                    else:
+                                        break
+                                # 去重：与 on_llm_response 已 buffer 的最终 assistant 撞车时
+                                # 跳过（content 相同且无 tool_calls 视为同一条纯文本回复）。
+                                # _append_messages_inner 的 message_id 去重是第二道兜底。
+                                _asst = _step[0]
+                                _asst_content = _asst.get("content", "")
+                                _asst_has_tc = bool(_asst.get("tool_calls"))
+                                _last_asst_t = next(
+                                    (m for m in reversed(t_msgs) if m.get("role") == "assistant"),
+                                    None
+                                )
+                                _is_dup = (
+                                    not _asst_has_tc
+                                    and _last_asst_t is not None
+                                    and _last_asst_t.get("content") == _asst_content
+                                )
+                                if not _is_dup:
+                                    # 一次性 append 整个 step（约束7 原子落盘）
+                                    await self._t_file_mgr.append_messages(
+                                        window_key, _step
+                                    )
+                                    logger.debug(
+                                        f"[T-FILE] {window_key}: fallback 补录 step "
+                                        f"(assistant+{len(_step) - 1} tool, 原子落盘)"
+                                    )
                     except Exception as _ae:
-                        logger.debug(f"[T-FILE] assistant 补录异常: {_ae}")
+                        logger.debug(f"[T-FILE] assistant 补录 fallback 异常: {_ae}")
 
                 except Exception as e:
                     logger.error(f"[T-FILE] {window_key}: 处理异常 {e}，保持原始 req.contexts")

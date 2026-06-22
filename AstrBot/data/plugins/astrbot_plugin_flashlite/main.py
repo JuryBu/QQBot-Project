@@ -1417,10 +1417,26 @@ class FlashLiteEngine(RouterMixin, ContextMixin, Star):
 
     @filter.on_llm_response()
     async def track_main_model_cost(self, event: AstrMessageEvent, response) -> None:
-        """on_llm_response 钩子：捕获主模型 provider 调用的 usage 数据并记录成本
+        """on_llm_response 钩子：双职责。
 
-        Critical Fix: 补全主模型调用记账，确保 CostTracker 覆盖所有 API 调用路径。
+        (1) S3 F3.4 assistant 补录前置（critical）：主模型回复送出那一刻立即把
+            assistant 文本 buffer_message 进 T 文件，不再等下次 on_llm_request 反查
+            （设计§1.1：旧反查路径 first_reply 锚点 100% 错位）。
+        (2) 捕获主模型 provider 调用的 usage 数据并记录成本（CostTracker 覆盖全路径）。
+
+        框架在 on_agent_done（ReAct 全循环结束、最终回复确定、_save_to_history 之前）
+        触发本钩子一次，response 是「最终那次」LLMResponse（通常纯文本无 tool_call）。
+        钩子签名只有 (event, response)，拿不到 run_context.messages，故中间 ReAct step
+        （assistant.tool_calls + 配对 tool）由 _inject_flashlite_context_impl 的反查
+        fallback 整段原子补录（约束7），二者互补。
         """
+        # ---- (1) F3.4 assistant 补录前置（独立 try，不受下方 cost early-return 影响）----
+        try:
+            self._buffer_assistant_reply(event, response)
+        except Exception as _be:
+            logger.debug(f"[T-FILE] F3.4 assistant 补录前置跳过: {_be}")
+
+        # ---- (2) 主模型成本记账 ----
         try:
             if not hasattr(self, '_cost_tracker') or self._cost_tracker is None:
                 return
@@ -1466,6 +1482,94 @@ class FlashLiteEngine(RouterMixin, ContextMixin, Star):
             )
         except Exception as e:
             logger.debug(f"[CostTracker] 主模型记账跳过: {e}")
+
+    def _buffer_assistant_reply(self, event: AstrMessageEvent, response) -> None:
+        """S3 F3.4：on_llm_response 时把最终 assistant 文本回复立即 buffer 到 T 文件。
+
+        设计§1.1：旧路径靠「下次 on_llm_request 从 contexts 反查」补录 assistant，
+        first_reply 锚点滞后整整一轮、100% 错位。改在回复送出那一刻（本钩子）就
+        buffer_message，锚点即时正确。
+
+        约束7（step 原子）：本钩子的 response 只是「最终那次」LLMResponse，拿不到
+        中间 ReAct step 的配对 tool 消息。若最终回复**带 tool_calls**（半个 step），
+        这里绝不单独落盘 assistant——交给 _inject_flashlite_context_impl 的反查
+        fallback 把 assistant + 配对 tool 整段一次性 append。本钩子只处理「纯文本、
+        无 tool_call 的最终 assistant 回复」这一原子完整的单条 step。
+        """
+        if not getattr(self, '_t_file_mgr', None):
+            return
+
+        # 最终回复若带 tool_calls → 不是完整 step，交给反查 fallback（约束7）
+        tools_args = getattr(response, 'tools_call_args', None) or []
+        tools_name = getattr(response, 'tools_call_name', None) or []
+        if tools_args or tools_name:
+            return
+
+        # 提取最终 assistant 纯文本（completion_text 优先，兼容 result_chain）
+        text = ""
+        try:
+            text = getattr(response, 'completion_text', '') or ''
+        except Exception:
+            text = ''
+        if not text:
+            rc = getattr(response, 'result_chain', None)
+            if rc is not None and hasattr(rc, 'get_plain_text'):
+                try:
+                    text = rc.get_plain_text() or ''
+                except Exception:
+                    text = ''
+        text = (text or '').strip()
+        if not text:
+            return  # 空回复不落盘，避免污染 round 序列
+
+        window_key = self._extract_window_key(event)
+        if not window_key or window_key == 'unknown':
+            return
+
+        # 构造带 F3.1 v2 字段的 assistant message（sender 为 bot）
+        # bot_qq：从 Knowledge 维护的 self_id 集合取一个（运行时由 OneBot 连接填充，
+        #         见 __init__ self._knowledge._bot_qq_ids）；bot_name：persona 名称，
+        #         与 _persist_bot_reply 同源（astrbot.core.sp.persona_name，默认老板娘）。
+        bot_qq = ""
+        try:
+            _bot_ids = getattr(getattr(self, '_knowledge', None), '_bot_qq_ids', None)
+            if _bot_ids:
+                bot_qq = str(next(iter(_bot_ids)))
+        except Exception:
+            bot_qq = ""
+        bot_name = "老板娘"
+        try:
+            from astrbot.core import sp as _sp
+            _persona = _sp.get("persona_name", None)
+            if _persona:
+                bot_name = _persona
+        except Exception:
+            pass
+        asst_msg = {
+            "role": "assistant",
+            "content": text,
+            # message_id 留空（bot 自身回复在送出前无平台 message_id）
+            "message_id": None,
+            "sender": {
+                "qq": bot_qq,
+                "name": bot_name,
+                "is_bot": True,
+            },
+            "receive_seq": time.time_ns(),
+            "has_multimodal": False,
+            # S1 兼容 meta（保留旧消费方读取 is_bot/sender_name）
+            "meta": {
+                "sender_qq": bot_qq,
+                "sender_name": bot_name,
+                "is_bot": True,
+            },
+        }
+        # buffer_message 同步 + WAL 兜底；下次 on_llm_request Phase1 flush 取号落盘
+        self._t_file_mgr.buffer_message(window_key, asst_msg)
+        logger.debug(
+            f"[T-FILE] {window_key}: F3.4 前置 buffer 最终 assistant 回复 "
+            f"({len(text)} 字)"
+        )
 
     # ========================
     # T 文件辅助方法
