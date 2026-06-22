@@ -151,6 +151,92 @@ def _create_empty_t_file(window_key: str) -> dict:
     }
 
 
+def _parse_step_id(sid: Any) -> int:
+    """解析 step_id 字符串为整数（s00000123 → 123）；非法/None 返回 -1。"""
+    if not sid or not isinstance(sid, str) or not sid.startswith("s"):
+        return -1
+    try:
+        return int(sid[1:])
+    except ValueError:
+        return -1
+
+
+def _recover_number_source_after_corruption(
+    checkpoints_dir: str, window_key: str, fp: str
+) -> Tuple[int, int]:
+    """S3 批3.5-B(numbering-3)：T 文件损坏重建时，从 state.json + 现存 .corrupt 文件
+    恢复 (next_round_id, next_step_id)，绝不复用历史号（取已见最大 +1）。
+
+    缺陷：原 _create_empty_t_file 把 next_round_id/next_step_id 重置为 1，但 state.json
+    独立存活（current_round_id=r000050）→ 重号；assign_round 又从 1 起，与历史轮号冲突，
+    违反「round_id 全局单调绝不复用」铁律。
+
+    号源来源（取各项 max + 1，下限 1）：
+      (1) state.json 的 current_round_id（最近所在轮）+ last_user/assistant/first_reply
+          step_id（state 不直接存 next_step_id，但这些字段是已分配步号的水位线索——
+          T 文件完全损坏不可解析时，它们是 step 号源的唯一兜底）；
+      (2) 现存 {fp}.corrupt.* 文件里 messages 的 max round_id/step_id（损坏前已落盘的
+          最大轮/步）+ metadata 残存 next_round_id/next_step_id（已用号上界）；
+      (3) 兜底下限 1。
+    """
+    max_round = 0
+    max_step = 0
+
+    # (1) state.json：current_round_id + 各 step_id 字段（step 号源兜底）
+    try:
+        st = round_tracker.load_state(checkpoints_dir, window_key)
+        rn = round_tracker.parse_round_id(st.get("current_round_id"))
+        if rn > max_round:
+            max_round = rn
+        for _sk in ("last_user_step_id", "last_assistant_step_id",
+                    "first_reply_step_id"):
+            sn = _parse_step_id(st.get(_sk))
+            if sn > max_step:
+                max_step = sn
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[T-FILE] 损坏重建读 state 号源失败 {window_key}: {e}")
+
+    # (2) 现存 .corrupt 文件 messages 的 max round_id / step_id
+    corrupt_prefix = os.path.basename(fp) + ".corrupt."
+    try:
+        for name in os.listdir(checkpoints_dir):
+            if not name.startswith(corrupt_prefix):
+                continue
+            cp = os.path.join(checkpoints_dir, name)
+            try:
+                with open(cp, "r", encoding="utf-8") as cf:
+                    cdata = json.load(cf)
+            except Exception:
+                continue  # 损坏文件本身也可能不可读，跳过
+            cmsgs = cdata.get("messages") if isinstance(cdata, dict) else None
+            if not isinstance(cmsgs, list):
+                continue
+            for m in cmsgs:
+                if not isinstance(m, dict):
+                    continue
+                rn = round_tracker.parse_round_id(m.get("round_id"))
+                if rn > max_round:
+                    max_round = rn
+                sn = _parse_step_id(m.get("step_id"))
+                if sn > max_step:
+                    max_step = sn
+            # corrupt 文件 metadata 里若残存 next_* 号源，也纳入（已用号的上界）
+            cmeta = cdata.get("metadata") if isinstance(cdata, dict) else None
+            if isinstance(cmeta, dict):
+                nr = int(cmeta.get("next_round_id", 0) or 0)
+                if nr - 1 > max_round:
+                    max_round = nr - 1
+                ns = int(cmeta.get("next_step_id", 0) or 0)
+                if ns - 1 > max_step:
+                    max_step = ns - 1
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[T-FILE] 损坏重建扫 .corrupt 号源失败 {window_key}: {e}")
+
+    next_round = max(max_round + 1, 1)
+    next_step = max(max_step + 1, 1)
+    return next_round, next_step
+
+
 # ========================
 # S3 F1.1: schema v1 → v2 迁移
 # ========================
@@ -678,10 +764,11 @@ class TFileManager:
         self._msg_buffer: Dict[str, List[dict]] = {}
         # S3 F1.4: per-window WAL 临时键序号（message_id 缺失时兜底去重用，单调递增）
         self._wal_seq: Dict[str, int] = {}
-        # S3 F2.2: 本进程「认领」的 in-flight WAL 窗口集合。
+        # S3 F2.2 / 批3.5-B: 本进程「认领」的 in-flight WAL 窗口集合。
         # buffer_message 一旦往某窗口写 WAL，该窗口的 WAL 即本进程 in-flight 镜像
-        # （等待 flush），**不是**上次崩溃残留 → load 触发的恢复对这些窗口跳过 replay
-        # （否则会与内存 buffer 的 _merge_buffer 视图重复计数）。flush/clear 后移除。
+        # （等待 flush），**不是**上次崩溃残留 → _do_recover 对这些窗口跳过 replay
+        # 且不清 WAL（否则会与内存 buffer 的待 flush 消息重复落盘 / 丢失 WAL 兜底）。
+        # flush/clear 后移除。批3.5-B 起 _do_recover replay 段实际据此守卫。
         self._wal_owned: set = set()
         # S3 F2.2: 已做过崩溃恢复的窗口集合（按需恢复，每窗口仅在首次 load 触发一次）
         self._recovered: set = set()
@@ -708,9 +795,18 @@ class TFileManager:
         WAL append-only，flush_buffer 成功后清理（见 flush_buffer）。
 
         首次接触某窗口（本进程内）时，磁盘上若已有 WAL 文件，那是**上次进程崩溃
-        的残留**（buffer_message 同步、无法 async replay）：把残留消息吸收进内存
-        buffer（随本批一起正常 flush 取号落盘，不丢），清掉旧 WAL，再从本条起重写
-        本进程的 in-flight WAL。重复由 _append_messages_inner 的 message_id 去重兜底。
+        的残留**（buffer_message 同步、无法 async replay）。
+
+        S3 批3.5-B(first-touch-absorb / residual-absorbed-not-rewal / 抢标决策)：
+          - 吸收残留消息进内存 buffer（随本批 flush 取号落盘，不丢）。
+          - **重写残留到新 in-flight WAL**（按本进程新 seq）：吸收进内存后若不重写，
+            二次崩溃（flush 前再挂）这批残留就永久丢（旧 WAL 已被吸收清掉）。重写后
+            二次崩溃仍能 replay 补回。
+          - **不抢标 _recovered**：让首次 load（flush_buffer 内部触发）仍走 _do_recover
+            做 gen 校验 + dangling 自愈（抢标会永久屏蔽这两项）。该窗口随即被认领进
+            _wal_owned，_do_recover 据此识别「本进程 in-flight WAL」跳过 replay（消息在
+            内存 buffer，由 flush 唯一落盘），故 first-touch 路径不产生重复；万一 flush
+            前二次崩溃，重写的 WAL 在新进程（窗口不在 _wal_owned）走 replay 补回。
         """
         first_touch = (
             window_key not in self._msg_buffer
@@ -720,22 +816,31 @@ class TFileManager:
             self._msg_buffer[window_key] = []
 
         if first_touch:
+            self._wal_seq[window_key] = 0
             # 吸收上次崩溃残留 WAL（若有），避免与本进程新 WAL 行混在同一文件
             residual = wal_read(CHECKPOINTS_DIR, window_key)
             if residual:
-                for entry in residual:
-                    rmsg = entry.get("msg")
-                    if isinstance(rmsg, dict):
-                        self._msg_buffer[window_key].append(rmsg)
-                logger.warning(
-                    f"[T-FILE] buffer 首次接触 {window_key}: 吸收残留 WAL "
-                    f"{len(residual)} 条（随本批 flush 落盘）"
-                )
+                residual_msgs = [
+                    entry["msg"] for entry in residual
+                    if isinstance(entry.get("msg"), dict)
+                ]
+                self._msg_buffer[window_key].extend(residual_msgs)
+                # 清掉旧 WAL 文件，再按新 seq 把残留重写进 in-flight WAL（防二次崩溃丢）
                 wal_clear(CHECKPOINTS_DIR, window_key)
-            # 本进程认领该窗口 WAL（in-flight），并标记已恢复（无需 load 再 replay）
+                for rmsg in residual_msgs:
+                    _seq = self._wal_seq[window_key]
+                    self._wal_seq[window_key] = _seq + 1
+                    wal_append(
+                        CHECKPOINTS_DIR, window_key, rmsg,
+                        wal_dedup_key(rmsg, window_key, _seq),
+                    )
+                logger.warning(
+                    f"[T-FILE] buffer 首次接触 {window_key}: 吸收并重写残留 WAL "
+                    f"{len(residual_msgs)} 条（随本批 flush 落盘，不抢标 _recovered）"
+                )
+            # 本进程认领该窗口 WAL（in-flight）。注意：**不**抢标 _recovered，
+            # 让 _do_recover 仍做 gen 校验/自愈，重复靠落盘 receive_seq 去重挡。
             self._wal_owned.add(window_key)
-            self._recovered.add(window_key)
-            self._wal_seq[window_key] = 0
 
         # 添加时间戳
         if "timestamp" not in msg:
@@ -750,24 +855,58 @@ class TFileManager:
 
     async def flush_buffer(self, window_key: str) -> None:
         """将缓冲区中的消息批量写入 T 文件磁盘（带锁），落盘成功后清理 WAL（F1.4）。"""
-        pending = self._msg_buffer.pop(window_key, [])
-        if not pending:
-            # buffer 空但可能残留空 WAL（极端情况）：顺手清掉，重置 seq / owned
-            wal_clear(CHECKPOINTS_DIR, window_key)
-            self._wal_seq.pop(window_key, None)
-            self._wal_owned.discard(window_key)
-            return
+        # S3 批3.5-B(flush-walclear-race)：pop pending 移入锁内。旧代码锁外 pop 后
+        # await self.load 让出事件循环，并发 buffer_message 可往同窗口写新 WAL 行，
+        # flush 结束 wal_clear 删整文件 → 新消息留内存却无 WAL 兜底（崩溃丢）。
+        # pop 进锁内后，pop 与 wal_clear 之间不再让出，消除该并发窗口。
         async with self._get_lock(window_key):
+            pending = self._msg_buffer.pop(window_key, [])
+            if not pending:
+                # S3 批3.5-B(flush-empty-wipes-residual-wal, critical)：buffer 空时
+                # 绝不无条件 wal_clear。WAL 仍可能有【上次崩溃残留】（崩前未落盘消息）；
+                # 旧代码直接删 = 永久丢。改为：若 WAL 文件存在，先触发崩溃恢复 replay
+                # （_recover_window_if_needed 内部按 receive_seq 去重落盘；若是本进程
+                # in-flight owned 则跳过 replay 且不删，留待真正有 buffer 时 flush）。
+                wal_fp = wal_file_path(CHECKPOINTS_DIR, window_key)
+                if os.path.exists(wal_fp):
+                    # 恢复用独立 _recover_locks（不与本 _get_lock 死锁），replay 残留落盘
+                    await self._recover_window_if_needed(window_key)
+                else:
+                    # 确无 WAL：清理本进程残留计数 / 认领标记即可
+                    self._wal_seq.pop(window_key, None)
+                    self._wal_owned.discard(window_key)
+                return
             t_file = await self.load(window_key)
-            # 路径 A（buffer flush）：真持久化 → 取号
+            # 路径 A（buffer flush）：真持久化 → 取号。
+            # 注意：load 已触发 _do_recover，因本窗口在 _wal_owned（buffer_message
+            # 已认领）故跳过 replay，pending 是唯一落盘来源，无需 dedup。
             t_file = self._append_messages_inner(
                 t_file, pending, window_key=window_key, assign_numbers=True
             )
             await self.save(window_key, t_file)
-        # F1.4：T 文件落盘成功后才清 WAL（顺序关键：先 save 再清，崩在中间下次仍 replay）
-        wal_clear(CHECKPOINTS_DIR, window_key)
-        self._wal_seq.pop(window_key, None)
-        self._wal_owned.discard(window_key)
+            # F1.4：T 文件落盘成功后才清 WAL（顺序关键：先 save 再清，崩在中间下次仍
+            # replay）。
+            # S3 批3.5-B(flush-walclear-race)：pop 已进锁内消除 flush↔flush 重复落盘。
+            # 但 buffer_message 是无锁同步热路径，可能在上面 await load/save 让出时插入，
+            # 往同窗口 buffer 追加【pop 之后】的新消息并写新 WAL 行。直接 wal_clear 删
+            # 整文件会丢这些新行的兜底（消息仍在 buffer 但二次崩溃前无 WAL）。
+            # 处理：wal_clear 后，若 buffer 又积了新消息，按新 seq 重写它们的 WAL，
+            # 保留兜底（这些消息归下次 flush 落盘）；否则彻底清理认领。
+            wal_clear(CHECKPOINTS_DIR, window_key)
+            leftover = self._msg_buffer.get(window_key) or []
+            if leftover:
+                self._wal_seq[window_key] = 0
+                for lmsg in leftover:
+                    _ls = self._wal_seq[window_key]
+                    self._wal_seq[window_key] = _ls + 1
+                    wal_append(
+                        CHECKPOINTS_DIR, window_key, lmsg,
+                        wal_dedup_key(lmsg, window_key, _ls),
+                    )
+                # 仍认领该窗口（in-flight），等下次 flush
+            else:
+                self._wal_seq.pop(window_key, None)
+                self._wal_owned.discard(window_key)
 
     def _get_lock(self, window_key: str) -> asyncio.Lock:
         """获取 per-window 的 asyncio.Lock"""
@@ -860,6 +999,21 @@ class TFileManager:
             except OSError as rename_err:
                 logger.warning(f"[T-FILE] 无法保留损坏文件: {rename_err}")
             t_file = _create_empty_t_file(window_key)
+            # S3 批3.5-B(numbering-3)：损坏重建绝不让号源回退到 1（state.json 存活 +
+            # .corrupt 残存历史号 → 否则重号）。从 state + .corrupt 取已见 max+1 续号。
+            try:
+                nr, ns = _recover_number_source_after_corruption(
+                    CHECKPOINTS_DIR, window_key, fp
+                )
+                t_file["metadata"]["next_round_id"] = nr
+                t_file["metadata"]["next_step_id"] = ns
+                if nr > 1 or ns > 1:
+                    logger.warning(
+                        f"[T-FILE] 损坏重建号源续号 {window_key}: "
+                        f"next_round_id={nr} next_step_id={ns}（绝不复用历史号）"
+                    )
+            except Exception as _nse:  # noqa: BLE001
+                logger.error(f"[T-FILE] 损坏重建号源恢复失败 {window_key}: {_nse}")
             await self.save(window_key, t_file)
             return t_file
 
@@ -924,6 +1078,14 @@ class TFileManager:
         wal_file = wal_file_path(CHECKPOINTS_DIR, window_key)
         has_wal = os.path.exists(wal_file)
 
+        # S3 批3.5-B：本进程 in-flight WAL 守卫。窗口在 _wal_owned 说明该 WAL 是本进程
+        # buffer_message 写下的 in-flight 镜像（消息在内存 buffer，待 flush 落盘），
+        # **不是**上次崩溃残留 → 绝不 replay（否则 replay 落盘 + flush 又落盘 = 重复，
+        # 且末尾 wal_clear 会把内存里未落盘消息的 WAL 兜底删掉）。first-touch 吸收残留
+        # 后认领 _wal_owned，故残留经此路径只由 flush 落盘一次。仅做 gen 校验 + 自愈。
+        owned_inflight = window_key in self._wal_owned
+        replay_entries = [] if owned_inflight else wal_entries
+
         # 无 WAL 残留：仍需做 gen 校验 + 自愈（崩在 save 之后、清 WAL 之前不会到这；
         # 但崩在 T 文件 save 与 state save 之间会留 gen 不一致，需校验）
         t_file = await self._load_t_file_raw(window_key)
@@ -934,44 +1096,37 @@ class TFileManager:
         dirty = False
 
         # ---- (2) replay WAL ----
-        if wal_entries:
-            # T 文件已落盘消息的 message_id 集合（去重依据）
-            existing_ids = {
-                m.get("message_id")
-                for m in t_file.get("messages", [])
-                if isinstance(m, dict) and m.get("message_id") is not None
-            }
-            to_replay: List[dict] = []
-            for entry in wal_entries:
-                msg = entry.get("msg")
-                if not isinstance(msg, dict):
-                    continue
-                mid = msg.get("message_id")
-                # 有 message_id 且已在 T 文件 → 已落盘，跳过（去重）
-                if mid is not None and mid in existing_ids:
-                    continue
-                to_replay.append(msg)
-                if mid is not None:
-                    existing_ids.add(mid)  # 防 WAL 内部同 message_id 重复行
-
+        if replay_entries:
+            # S3 批3.5-B(replay-dedup-ignores-wal-key)：去重统一下沉到落盘入口
+            # _append_messages_inner(dedup_against_existing=True)，按 receive_seq 主键
+            # （覆盖 message_id=None 的 user/assistant 补录）+ message_id 兜底去重，
+            # 不再在此用 message_id 预过滤（旧逻辑对 message_id=None 恒不去重 → 重复落盘）。
+            to_replay: List[dict] = [
+                entry["msg"] for entry in replay_entries
+                if isinstance(entry.get("msg"), dict)
+            ]
+            before_n = len(t_file.get("messages", []))
             if to_replay:
                 # 走唯一取号入口（与正常 append 合流），续 metadata.next_round_id
-                # → round_id 跳号不重号
+                # → round_id 跳号不重号；落盘前对 T 文件已有消息按 receive_seq 去重
                 t_file = self._append_messages_inner(
-                    t_file, to_replay, window_key=window_key, assign_numbers=True
+                    t_file, to_replay, window_key=window_key,
+                    assign_numbers=True, dedup_against_existing=True,
                 )
-                # _append_messages_inner 已推进 generation 并 save_state；重读 state
-                state = round_tracker.load_state(CHECKPOINTS_DIR, window_key)
-                metadata = t_file["metadata"]
-                dirty = True
-                logger.warning(
-                    f"[T-FILE] 崩溃恢复 replay WAL {window_key}: "
-                    f"{len(to_replay)}/{len(wal_entries)} 条补回（其余已落盘去重）"
-                )
-            else:
-                logger.info(
-                    f"[T-FILE] 崩溃恢复 {window_key}: WAL {len(wal_entries)} 条全部已落盘，仅清理"
-                )
+                appended_n = len(t_file.get("messages", [])) - before_n
+                if appended_n > 0:
+                    # _append_messages_inner 已推进 generation 并 save_state；重读 state
+                    state = round_tracker.load_state(CHECKPOINTS_DIR, window_key)
+                    metadata = t_file["metadata"]
+                    dirty = True
+                    logger.warning(
+                        f"[T-FILE] 崩溃恢复 replay WAL {window_key}: "
+                        f"{appended_n}/{len(replay_entries)} 条补回（其余已落盘 receive_seq 去重）"
+                    )
+                else:
+                    logger.info(
+                        f"[T-FILE] 崩溃恢复 {window_key}: WAL {len(replay_entries)} 条全部已落盘，仅清理"
+                    )
 
         # ---- (4) generation 交叉校验：取大者修正小者 ----
         t_gen = int(metadata.get("generation", 0) or 0)
@@ -1011,7 +1166,10 @@ class TFileManager:
         # ---- 落盘修复结果 + 清 WAL ----
         if dirty:
             await self.save(window_key, t_file)
-        if has_wal:
+        # S3 批3.5-B：owned_inflight（本进程 in-flight WAL）时绝不清 WAL / 不动 _wal_seq
+        # ——那是 buffer_message 写的、待 flush 的镜像（消息尚在内存 buffer 未落盘），
+        # 由 flush_buffer 负责清；此处清掉会让内存里未落盘消息丢失 WAL 兜底（二次崩溃丢）。
+        if has_wal and not owned_inflight:
             # 顺序：先 save 再清 WAL（崩在中间下次仍可 replay，幂等去重）
             wal_clear(CHECKPOINTS_DIR, window_key)
             self._wal_seq.pop(window_key, None)
@@ -1115,6 +1273,7 @@ class TFileManager:
         *,
         window_key: Optional[str] = None,
         assign_numbers: bool = False,
+        dedup_against_existing: bool = False,
     ) -> dict:
         """追加消息的核心逻辑（纯内存操作 + 可选取号，无 asyncio 锁）。
 
@@ -1129,6 +1288,16 @@ class TFileManager:
 
         约束 1：buffer flush（路径 A）与 extract（路径 B）必须合流到本函数取号，
         防双号 / 跳号 / 倒序。
+
+        S3 批3.5-B：``dedup_against_existing``（仅崩溃恢复落盘路径传 True）——
+        这是「buffer/WAL 崩溃恢复去重」的【统一落点】。崩溃 replay / first-touch
+        吸收残留 WAL 重写后再次 replay，都可能把同一条消息二次落盘；本函数在落盘
+        前对 t_file 已有消息按 ``receive_seq``（F3.1 全局单调唯一纳秒戳，去重主键，
+        覆盖 message_id=None 的 user/assistant 补录）+ ``message_id``（兜底，旧路径
+        无 receive_seq 时）双键去重，已落盘的跳过不再 append/取号。
+        正常 append（dedup_against_existing=False）不做去重：receive_seq 天然唯一，
+        加去重纯属无谓开销。legacy 旧消息 receive_seq 缺省 0 / None，是不会被 replay
+        的历史，不进入去重集合（避免把多条 receive_seq=0 的旧消息当成互相重复）。
         """
         now_iso_ms = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
 
@@ -1139,7 +1308,37 @@ class TFileManager:
             metadata = t_file.setdefault("metadata", {})
             _ensure_metadata_v2_fields(metadata)
 
+        # ---- S3 批3.5-B：崩溃恢复去重集合（receive_seq 主键 + message_id 兜底）----
+        existing_rseq: set = set()
+        existing_mid: set = set()
+        if dedup_against_existing:
+            for _m in t_file.get("messages", []):
+                if not isinstance(_m, dict):
+                    continue
+                _rs = _m.get("receive_seq")
+                # receive_seq=0/None 是 legacy 旧消息默认值，不是真去重键 → 不收集
+                if isinstance(_rs, int) and _rs > 0:
+                    existing_rseq.add(_rs)
+                _mid = _m.get("message_id")
+                if _mid is not None and _mid != "":
+                    existing_mid.add(_mid)
+
+        appended = 0
         for msg in new_messages:
+            # ---- S3 批3.5-B：落盘前去重（仅崩溃恢复路径）----
+            if dedup_against_existing:
+                _rs = msg.get("receive_seq")
+                _mid = msg.get("message_id")
+                if isinstance(_rs, int) and _rs > 0 and _rs in existing_rseq:
+                    continue  # receive_seq 已落盘（含 message_id=None 的补录）
+                if _mid is not None and _mid != "" and _mid in existing_mid:
+                    continue  # 兜底：message_id 已落盘（旧路径无 receive_seq）
+                # 记入集合，防本批内部同键重复（同一条在 WAL 出现多行）
+                if isinstance(_rs, int) and _rs > 0:
+                    existing_rseq.add(_rs)
+                if _mid is not None and _mid != "":
+                    existing_mid.add(_mid)
+
             # ---- 构建 v2 存储格式 ----
             stored_msg = {
                 "role": msg.get("role", "user"),
@@ -1194,14 +1393,18 @@ class TFileManager:
                 stored_msg["first_reply"] = assigned["first_reply"]
 
             t_file["messages"].append(stored_msg)
+            appended += 1
 
-        t_file["metadata"]["total_messages_ever"] += len(new_messages)
+        # total_messages_ever 按【实际落盘】条数推进（崩溃恢复去重跳过的不计）
+        t_file["metadata"]["total_messages_ever"] += appended
 
         # ---- F2.2 generation 同步推进：仅真持久化路径（取号成功）才 ++ ----
         # T 文件 metadata.generation 与 state.generation 始终保持相等并同步前进，
         # 二者写盘是两次独立 I/O，崩在中间会出现不一致 → 恢复时取大者修正小者。
         # 取号前先以「两边较大者」为基准，消除历史不一致，再 +1。
-        if state is not None and window_key:
+        # S3 批3.5-B：崩溃恢复全部被去重（appended==0）时无实际落盘，不推进 gen / 不
+        # 重写 state（避免无谓写盘；两边仍各自维持，下游 gen 校验另行兜底）。
+        if state is not None and window_key and appended > 0:
             base_gen = max(
                 int(t_file["metadata"].get("generation", 0) or 0),
                 int(state.get("generation", 0) or 0),
