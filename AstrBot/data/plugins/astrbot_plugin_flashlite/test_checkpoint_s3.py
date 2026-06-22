@@ -85,7 +85,12 @@ def test_create_empty_is_v2():
     md = t["metadata"]
     assert md["next_round_id"] == 1
     assert md["next_step_id"] == 1
-    assert md["record_state"] == {"last_compressed_round_id": None}
+    # S4 R1: record_state 扩五锚。压缩锚(S3 语义)仍 None，新增四锚补默认。
+    assert md["record_state"]["last_compressed_round_id"] is None
+    assert md["record_state"]["last_grouped_rg_id"] is None
+    assert md["record_state"]["round_groups"] == []
+    assert md["record_state"]["hit_table"] == {}
+    assert md["record_state"]["summary_watermark_rg_id"] is None
     assert md["bpc_state"] == {}
     assert md["concurrency_state"] == {}
 
@@ -132,7 +137,12 @@ def test_migration_preserves_old_messages():
     md = migrated["metadata"]
     assert md["next_round_id"] == 1
     assert md["next_step_id"] == 1
-    assert md["record_state"] == {"last_compressed_round_id": None}
+    # S4 R1: 迁移后 record_state 五锚齐全，压缩锚仍 None。
+    assert md["record_state"]["last_compressed_round_id"] is None
+    assert md["record_state"]["last_grouped_rg_id"] is None
+    assert md["record_state"]["round_groups"] == []
+    assert md["record_state"]["hit_table"] == {}
+    assert md["record_state"]["summary_watermark_rg_id"] is None
     # 已有的 dangling_repair_history 保留不被覆盖
     assert md["dangling_repair_history"] == [{"type": "x"}]
 

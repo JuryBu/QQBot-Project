@@ -14,6 +14,7 @@ CHECKPOINT 压缩模块 v2.0 — 三系统分立架构
 """
 
 import asyncio
+import copy
 import json
 import math
 import os
@@ -109,6 +110,23 @@ def estimate_context_msg_tokens(msg: dict) -> int:
 # T 文件数据结构工厂
 # ========================
 
+# S4 R1: record_state 五锚默认值（_create_empty_t_file 初始化 + _ensure 嵌套补默认共用）。
+#   - last_compressed_round_id : 压缩锚（S3 已有）——record 合成/压缩到哪一轮，
+#                                由 S3 压缩链路单调推进。绝不与 last_grouped 混为一谈。
+#   - last_grouped_rg_id       : 聚合锚（S4 新）——round-group 增量聚合到哪一组。
+#   - round_groups             : 边界表（S4 新）——已封/在编的 round-group 列表。
+#   - hit_table                : 命中表（S4/M4 新）——{rg_id: {hit_count,last_hit_ts,...}}。
+#   - summary_watermark_rg_id  : summary 封板水位（S4/D8 新）——防「有 full 无 summary」空洞。
+# 取号/格式约定全部沿用 round_tracker（rg_id 字符串、parse 数值比较）。
+_RECORD_STATE_DEFAULTS = {
+    "last_compressed_round_id": None,   # 压缩锚（S3 已有，勿动语义）
+    "last_grouped_rg_id": None,         # 聚合锚（S4 新，与压缩锚解耦）
+    "round_groups": [],                 # 边界表（S4 新）
+    "hit_table": {},                    # 命中表（S4/M4 新）
+    "summary_watermark_rg_id": None,    # summary 封板水位（S4/D8 新）
+}
+
+
 def _create_empty_t_file(window_key: str) -> dict:
     """创建空的 T 文件数据结构"""
     parts = window_key.split(":", 1)
@@ -143,8 +161,13 @@ def _create_empty_t_file(window_key: str) -> dict:
             "next_step_id": 1,
             # S3 F2.2: 与 {window}.state.json 交叉校验的代号（save 时 ++，恢复取大者修正小者）
             "generation": 0,
-            # S3 占位状态字典（S4/S5/S6 消费，S3 留空）
-            "record_state": {"last_compressed_round_id": None},
+            # S4 R1: record_state 五锚（占位状态字典，S4/S5/S6 消费）。
+            # ⚠️ last_compressed(压缩锚, S3 已有)≠last_grouped(聚合锚, S4 新)是两个
+            # 不同的锚：前者=「record 合成/压缩到哪一轮」(S3 压缩链路单调推进)；
+            # 后者=「round-group 增量聚合到哪一组」(S4 record 生成器推进)。二者解耦。
+            # deepcopy：round_groups(list)/hit_table(dict) 等可变默认值必须深拷贝，
+            # 否则多个 T 文件共享同一引用、互相串改（单测 R1 已覆盖）。
+            "record_state": copy.deepcopy(_RECORD_STATE_DEFAULTS),
             "bpc_state": {},
             "concurrency_state": {},
         },
@@ -263,7 +286,10 @@ _METADATA_V2_DEFAULTS = {
     "next_step_id": 1,
     # S3 F2.2: generation 交叉校验代号（与 state.json 同步推进，恢复取大者修正小者）
     "generation": 0,
-    "record_state": {"last_compressed_round_id": None},
+    # S4 R1: 五锚默认（见 _RECORD_STATE_DEFAULTS）。注意 _ensure_metadata_v2_fields
+    # 对 record_state 做「嵌套 key 级」补默认——旧 T 文件已有 record_state（只含
+    # last_compressed_round_id）时，顶层 key 存在不会被整体覆盖，须逐子键补缺。
+    "record_state": copy.deepcopy(_RECORD_STATE_DEFAULTS),
     "bpc_state": {},
     "concurrency_state": {},
 }
@@ -284,11 +310,23 @@ def _ensure_message_v2_fields(msg: dict, *, legacy: bool = False) -> dict:
 
 
 def _ensure_metadata_v2_fields(metadata: dict) -> dict:
-    """为 metadata 补齐 v2 新增字段（已有字段保留，如 dangling_repair_history）。"""
-    import copy
+    """为 metadata 补齐 v2 新增字段（已有字段保留，如 dangling_repair_history）。
+
+    S4 R1: record_state 改为「嵌套 key 级」补默认。旧 T 文件（S3 落盘）的
+    record_state 顶层 key 已存在但只含 last_compressed_round_id，若仍按顶层
+    `k not in metadata` 判断会整体跳过、四个新锚（last_grouped_rg_id /
+    round_groups / hit_table / summary_watermark_rg_id）永远补不上。故对
+    record_state 单独逐子键补缺，且**绝不覆盖**已有的 last_compressed_round_id。
+    """
     for k, default in _METADATA_V2_DEFAULTS.items():
         if k not in metadata:
             metadata[k] = copy.deepcopy(default)
+    # record_state 嵌套补默认（顶层已存在时也要补齐缺失子键）
+    rec_state = metadata.get("record_state")
+    if isinstance(rec_state, dict):
+        for sk, sv in _RECORD_STATE_DEFAULTS.items():
+            if sk not in rec_state:
+                rec_state[sk] = copy.deepcopy(sv)
     return metadata
 
 
