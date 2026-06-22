@@ -1479,9 +1479,19 @@ class FlashLiteEngine(RouterMixin, ContextMixin, Star):
 
         策略：T1 已压缩的消息数 + T 文件 messages 中现有数 = 已处理总数
         req.contexts 中超出这个数量的部分就是新消息。
-        
+
         H-2 修复：当 AstrBot 截断 contexts 导致 len < processed_count 时，
         使用指纹对齐降级策略恢复增量提取。
+
+        F3.2 调研结论（决定对齐策略）：
+        req.contexts 是 AstrBot 框架从 conversation.history 反序列化得到的
+        OpenAI 格式消息列表（astr_main_agent.py:1116/1337 `json.loads(history)`，
+        定义见 entities.py:100 `contexts: list[dict]`），元素仅含 OpenAI 标准
+        字段 role/content/tool_calls/tool_call_id，**不携带 flashlite 的
+        round_id/step_id**（那是 T 文件 message 的私有字段，不会回流到 contexts）。
+        故无法按 round_id 精确对齐，对齐键采用强化后的 _msg_fingerprint（F3.6）：
+        多模态 content 按 part 拼摘要消除假阳性 + tool_calls.id 提区分度 + 长度
+        50→200，使截断降级反查的命中更可靠、误配大幅减少。
         """
         existing_count = len(t_file.get("messages", []))
         compressed_count = t_file.get("T1", {}).get("original_msg_count", 0)
@@ -1496,25 +1506,49 @@ class FlashLiteEngine(RouterMixin, ContextMixin, Star):
         
         elif len(contexts) < processed_count:
             # ⚠️ H-2: AstrBot 截断了 contexts
-            # 降级策略：用 T 文件最后一条消息的内容指纹在 contexts 中反向查找对齐点
+            # 降级策略：用 T 文件末尾消息的强化指纹（F3.6）在 contexts 中反向
+            # 查找对齐点。contexts 不带 round_id（见上方 F3.2 调研结论），故只能
+            # 靠指纹；F3.6 强化后多模态假阳性消除、tool_calls.id 提升区分度。
             t_msgs = t_file.get("messages", [])
             if t_msgs:
+                ctx_fps = [self._msg_fingerprint(c) for c in contexts]
                 last_t_fp = self._msg_fingerprint(t_msgs[-1])
-                for i in range(len(contexts) - 1, -1, -1):
-                    if self._msg_fingerprint(contexts[i]) == last_t_fp:
+                # 末尾多锚点序列校验：在末单点命中基础上，进一步用 T 文件末尾
+                # 连续多条指纹与 contexts 对应尾段比对，避免单条指纹偶然撞车误配。
+                anchor_n = min(3, len(t_msgs))
+                t_tail_fps = [self._msg_fingerprint(m) for m in t_msgs[-anchor_n:]]
+                for i in range(len(ctx_fps) - 1, -1, -1):
+                    if ctx_fps[i] != last_t_fp:
+                        continue
+                    # 校验末尾 anchor_n 条序列一致（i 是 T 末条在 contexts 中的位置）
+                    start = i - anchor_n + 1
+                    if start >= 0 and ctx_fps[start:i + 1] == t_tail_fps:
                         new_msgs = contexts[i + 1:]
                         if new_msgs:
                             logger.info(
                                 f"[T-FILE] 降级对齐: contexts 被截断 "
                                 f"({len(contexts)} < {processed_count}), "
+                                f"多锚点({anchor_n})命中 @ctx[{i}], "
                                 f"找到 {len(new_msgs)} 条新消息"
                             )
                         return new_msgs
-            
+                # 多锚点全失败时退回单锚点（兼容 T 文件仅 1 条等边界）
+                for i in range(len(ctx_fps) - 1, -1, -1):
+                    if ctx_fps[i] == last_t_fp:
+                        new_msgs = contexts[i + 1:]
+                        if new_msgs:
+                            logger.info(
+                                f"[T-FILE] 降级对齐(单锚点): contexts 被截断 "
+                                f"({len(contexts)} < {processed_count}), "
+                                f"找到 {len(new_msgs)} 条新消息"
+                            )
+                        return new_msgs
+
             # 完全无法对齐 → 安全降级，不追加
             logger.warning(
                 f"[T-FILE] contexts 截断且无法对齐 "
-                f"({len(contexts)} < {processed_count})"
+                f"({len(contexts)} < {processed_count}, "
+                f"t_msgs={len(t_file.get('messages', []))})"
             )
             return []
         
@@ -1522,14 +1556,58 @@ class FlashLiteEngine(RouterMixin, ContextMixin, Star):
 
     @staticmethod
     def _msg_fingerprint(msg: dict) -> str:
-        """消息指纹：role + content 前50字 + tool_call_id
-        
+        """消息指纹：role + content 摘要 + tool_calls.id + tool_call_id
+
         用于在 contexts 截断场景下进行消息对齐匹配。
+
+        F3.6 强化（修假阳性 + 提区分度）：
+        - content 是 list（OpenAI 多模态）→ 按 part 类型逐块拼摘要，
+          如 "text:你好世界|img:1"，不再裸 str(list)[:N]（旧实现所有多模态
+          消息都以 "[{'type'..." 开头 → 指纹前缀全同 → 截断对齐假阳性）
+        - content 是 str → 保持兼容，取前 N 字
+        - assistant 带 tool_calls → 拼入各 tool_calls[].id（OpenAI 标准字段，
+          天然唯一，大幅提升 assistant 消息区分度）
+        - 摘要长度 50 → 200
         """
+        _MAX = 200
         role = msg.get("role", "")
-        content = str(msg.get("content", ""))[:50]
+        content = msg.get("content", "")
+
+        if isinstance(content, list):
+            # 多模态：按 part 类型拼摘要，避免 str(list) 前缀全同
+            seg_parts = []
+            img_count = 0
+            for part in content:
+                if not isinstance(part, dict):
+                    seg_parts.append(f"raw:{str(part)[:50]}")
+                    continue
+                ptype = part.get("type", "")
+                if ptype == "text":
+                    seg_parts.append(f"text:{str(part.get('text', ''))[:100]}")
+                elif ptype == "image_url":
+                    img_count += 1
+                elif ptype:
+                    seg_parts.append(f"{ptype}:1")
+            if img_count:
+                seg_parts.append(f"img:{img_count}")
+            content_sig = "|".join(seg_parts)[:_MAX]
+        else:
+            content_sig = str(content)[:_MAX]
+
+        # assistant function-calling：拼入 tool_calls 的 id（OpenAI 标准结构）
+        tc_sig = ""
+        tool_calls = msg.get("tool_calls")
+        if tool_calls and isinstance(tool_calls, list):
+            ids = []
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    ids.append(str(tc.get("id", "")))
+                else:
+                    ids.append(str(getattr(tc, "id", "")))
+            tc_sig = ",".join(ids)
+
         tcid = msg.get("tool_call_id", "")
-        return f"{role}|{content}|{tcid}"
+        return f"{role}|{content_sig}|tc={tc_sig}|{tcid}"
 
     # ========================
     # LLM 工具注册（AstrBot 原生 function-calling 集成）
