@@ -695,17 +695,30 @@ class ContextMixin:
                             await self._t_file_mgr.save(window_key, t_file)
                             logger.debug(f"[T-FILE] {window_key}: 追加 {len(new_msgs)} 条新消息")
 
-                    # Phase 2（锁外，秒级）: 压缩使用自己的 merge-save 保护
+                    # Phase 2（锁外，秒级）: S4 R2 旧 T1 覆盖式压缩已退役 → record 增量聚合。
+                    # 组装 record_cfg（面板可调参数透传给 compose_record / force_seal /
+                    # 接力中止）；缺键由 record 模块 DEFAULT 兜底。
+                    _record_cfg = {
+                        "record_compose_token_limit": self._cfg(
+                            "record_compose_token_limit",
+                            self._cfg("checkpoint_limit",
+                                      self._cfg("checkpoint_token_limit", 50000)),
+                        ),
+                        "rg_target_rounds": self._cfg("rg_target_rounds", 8),
+                        "rg_force_seal_rounds": self._cfg("rg_force_seal_rounds", 15),
+                        "rg_force_seal_tokens": self._cfg("rg_force_seal_tokens", 24000),
+                        "rg_force_seal_age": self._cfg("rg_force_seal_age", 40),
+                        "rg_max_batch_chars": self._cfg("rg_max_batch_chars", 60000),
+                        "rg_max_batch_tokens": self._cfg("rg_max_batch_tokens", 16000),
+                        "compress_delta_floor": self._cfg("compress_delta_floor", 200),
+                        "record_max_relay_rounds": self._cfg("record_max_relay_rounds", 3),
+                    }
                     t_file, compress_result = await self._t_file_mgr.compress_if_needed(
                         window_key=window_key,
                         t_file=t_file,
                         flash_lite_caller=self._call_flash_lite,
                         token_limit=self._cfg("checkpoint_limit", self._cfg("checkpoint_token_limit", 50000)),
-                        keep_recent=self._cfg("checkpoint_keep_recent", 10),
-                        compress_front_ratio=self._cfg("checkpoint_compress_front_ratio", 0.7),
-                        cooldown_seconds=self._cfg("checkpoint_cooldown_seconds", 300),
-                        target_min=self._cfg("checkpoint_target_min", 0.20),
-                        target_max=self._cfg("checkpoint_target_max", 0.40),
+                        record_cfg=_record_cfg,
                     )
 
                     if compress_result:

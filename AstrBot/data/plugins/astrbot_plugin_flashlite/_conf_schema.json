@@ -241,5 +241,61 @@
         "hint": "S7 消费，S3 先占位",
         "default": 30,
         "minimum": 1
+    },
+    "rg_force_seal_rounds": {
+        "description": "S4 record：round-group 强制封档轮数上限（组达此轮数即封，无视话题未结）",
+        "type": "int",
+        "hint": "D3 强制收敛防群聊反复重压漂移。建议 12-18",
+        "default": 15,
+        "minimum": 1
+    },
+    "rg_force_seal_tokens": {
+        "description": "S4 record：round-group 强制封档 token 上限（组累计 token 超此值即封）",
+        "type": "int",
+        "hint": "D3 强制收敛。建议 16000-32000",
+        "default": 24000,
+        "minimum": 1000
+    },
+    "rg_force_seal_age": {
+        "description": "S4 record：round-group 强制封档轮龄上限（组离最新对话超此轮数即封）",
+        "type": "int",
+        "hint": "D3 强制收敛，避免过老开放组长期不封。建议 30-60",
+        "default": 40,
+        "minimum": 1
+    },
+    "rg_max_batch_chars": {
+        "description": "S4 record：compose 预算切批的单批字符硬上限（超即另起一批喂模型）",
+        "type": "int",
+        "hint": "M3 字符预算硬约束（mcp 60K）。轮数是软目标、字符是硬约束",
+        "default": 60000,
+        "minimum": 1000
+    },
+    "rg_max_batch_tokens": {
+        "description": "S4 record：compose 预算切批的单批 token 硬上限（超即另起一批）",
+        "type": "int",
+        "hint": "M3 token 预算硬约束。建议 12000-20000",
+        "default": 16000,
+        "minimum": 500
+    },
+    "compress_delta_floor": {
+        "description": "S4 record：接力压缩中止阈值——连续 compose 后 token 降量低于此值即停（防巨图死循环）",
+        "type": "int",
+        "hint": "D6 接力中止判据。判据是『token 降量不足』而非『仍超阈值』。建议 100-400",
+        "default": 200,
+        "minimum": 0
+    },
+    "record_compose_token_limit": {
+        "description": "S4 record：触发 compose_record 增量聚合的请求体 token 阈值（同步触发，BPC 留 S5）",
+        "type": "int",
+        "hint": "D6 本批最简触发策略：请求体 token 超此值同步调 compose。与 checkpoint_limit 对齐",
+        "default": 50000,
+        "minimum": 1000
+    },
+    "record_max_relay_rounds": {
+        "description": "S4 record：单次接力链最多连续 compose 次数（防巨图/超长单轮死循环兜底）",
+        "type": "int",
+        "hint": "D6 接力中止次数上限，与 compress_delta_floor 双保险。建议 2-5",
+        "default": 3,
+        "minimum": 1
     }
 }

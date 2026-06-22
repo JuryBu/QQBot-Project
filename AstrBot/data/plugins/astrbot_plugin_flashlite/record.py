@@ -1118,6 +1118,153 @@ def _next_rg_num(kept_groups: List[Dict[str, Any]]) -> int:
 
 
 # ========================
+# 批2b R4：LLM 分段 prompt 构造 + 跨 provider 健壮 JSON 解析（纯逻辑、可单测）
+# ========================
+# compose_record 的 llm_caller 契约要 caller 在「给定一批轮」内吐 GroupSpec 列表。
+# 真接线时 caller 把这批轮渲成 prompt 调 _call_flash_lite（返回纯文本），再解析回
+# GroupSpec。两步都是纯逻辑：prompt 构造确定（同输入同 prompt）、解析容错（跨 provider
+# JSON 漂移：裸 JSON / ```json 围栏 / 前后赘述 / 单引号 / 尾逗号 全兜底）。
+
+_SEGMENT_PROMPT_HEADER = (
+    "你是对话归档器。下面给出若干『轮』（每轮含轮号 round 与文本），请把它们划分成"
+    "若干连续的 round-group（话题段），并为每段产出一句话标题、完整正文、精炼摘要。\n\n"
+    "硬规则（必须遵守，违反将被丢弃）：\n"
+    "1. 只在给定轮号范围内分段，round_start/round_end 必须是本批出现过的轮号整数。\n"
+    "2. 各段【连续且不重叠】：按轮号升序，后段 round_start = 前段 round_end + 1，"
+    "首段 round_start = 最小轮号，末段 round_end = 最大轮号，全程无空洞。\n"
+    "3. 每段 3-12 轮为宜；话题明显切换处断段；拿不准就少分段（宁可粗不可乱）。\n"
+    "4. full_text 保留关键事实/结论/待办；summary_text 更短（约 full 的一半）；"
+    "title 一句话概括。都用中文。\n\n"
+    "只输出一个 JSON 数组，不要任何解释/Markdown 围栏。格式：\n"
+    '[{"round_start":<int>,"round_end":<int>,"title":"...","full_text":"...","summary_text":"..."}]\n\n'
+    "=== 待分段的轮 ===\n"
+)
+
+
+def build_segment_prompt(
+    batch_rounds: List[Dict[str, Any]],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> str:
+    """把一批轮（RoundView）渲成分段 prompt（确定性，同输入同 prompt）。
+
+    每轮渲一行 `[round N] <text>`；text 过长按 cfg.rg_round_text_cap（默认 4000 字符）
+    截断（防单轮巨文撑爆 prompt——巨轮已在 _split_window_into_batches 独占批，这里再兜底
+    一层）。轮按 round_int 升序。
+    """
+    cap = _cfg_int(cfg, "rg_round_text_cap", 4000)
+    lines: List[str] = [_SEGMENT_PROMPT_HEADER]
+    target = _cfg_int(cfg, "rg_target_rounds", DEFAULT_RG_TARGET_ROUNDS)
+    lines.append(f"（目标：每段约 {target} 轮，话题切换处可断段）\n")
+    for r in sorted(batch_rounds, key=lambda x: int(x.get("round_int", 0))):
+        rn = int(r.get("round_int", 0))
+        text = r.get("text") or ""
+        if cap and len(text) > cap:
+            text = text[:cap] + " …(截断)"
+        lines.append(f"[round {rn}] {text}")
+    return "\n".join(lines)
+
+
+def _strip_json_envelope(raw: str) -> str:
+    """剥离常见非 JSON 包裹：```json 围栏、前后赘述，定位第一个 [ 到最后一个 ]。"""
+    if not raw:
+        return ""
+    s = raw.strip()
+    # 去 markdown 围栏
+    if "```" in s:
+        # 取第一个围栏块内内容
+        parts = s.split("```")
+        for p in parts:
+            p2 = p.strip()
+            if p2.lower().startswith("json"):
+                p2 = p2[4:].strip()
+            if p2.startswith("[") or p2.startswith("{"):
+                s = p2
+                break
+    # 定位最外层数组 [ ... ]
+    li = s.find("[")
+    ri = s.rfind("]")
+    if li != -1 and ri != -1 and ri > li:
+        return s[li:ri + 1]
+    # 退化：单对象 { ... } 包成数组
+    lo = s.find("{")
+    ro = s.rfind("}")
+    if lo != -1 and ro != -1 and ro > lo:
+        return "[" + s[lo:ro + 1] + "]"
+    return s
+
+
+def _loose_json_loads(text: str) -> Optional[Any]:
+    """容错 JSON 解析：先严格 json.loads，失败则修常见漂移（尾逗号 / 单引号）再试。"""
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    import re as _re
+    fixed = text
+    # 去对象/数组尾逗号： ,}  ,]
+    fixed = _re.sub(r",\s*([}\]])", r"\1", fixed)
+    try:
+        return json.loads(fixed)
+    except Exception:
+        pass
+    # 单引号 → 双引号（粗暴兜底，仅当不含双引号时安全）
+    if '"' not in fixed and "'" in fixed:
+        try:
+            return json.loads(fixed.replace("'", '"'))
+        except Exception:
+            pass
+    return None
+
+
+def parse_group_specs(
+    raw_text: str,
+    batch_rounds: List[Dict[str, Any]],
+    logger: Optional[logging.Logger] = None,
+) -> List[Dict[str, Any]]:
+    """把模型返回的纯文本解析成 GroupSpec 列表（跨 provider 健壮）。
+
+    流程：剥包裹 → 容错 loads → 规整每项字段（round_start/end 强转 int，文本兜底空串）。
+    无法解析 / 非列表 / 空 → 返回 []（触发 compose 失败兜底，不写盘）。
+    单项缺字段但 round_start/end 可解析仍保留（full/summary/title 缺省空）。
+    """
+    log = logger or _DEFAULT_LOGGER
+    stripped = _strip_json_envelope(raw_text or "")
+    data = _loose_json_loads(stripped)
+    if data is None:
+        log.warning("[RECORD] LLM 分段响应无法解析为 JSON（已尝试容错）")
+        return []
+    if isinstance(data, dict):
+        # 单对象或 {"groups":[...]} 包裹
+        if isinstance(data.get("groups"), list):
+            data = data["groups"]
+        else:
+            data = [data]
+    if not isinstance(data, list):
+        log.warning("[RECORD] LLM 分段响应非数组")
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        s = _coerce_round_int(item.get("round_start"))
+        e = _coerce_round_int(item.get("round_end"))
+        if s is None or e is None:
+            continue
+        out.append({
+            "round_start": s,
+            "round_end": e,
+            "title": str(item.get("title") or "")[:200],
+            "full_text": str(item.get("full_text") or item.get("full") or ""),
+            "summary_text": str(item.get("summary_text")
+                                 or item.get("summary") or ""),
+        })
+    return out
+
+
+# ========================
 # M1 RecordStore（地基薄封装：把 checkpoints_dir 绑定到实例，方法转发上面纯函数）
 # ========================
 class RecordStore:

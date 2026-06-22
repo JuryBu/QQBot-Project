@@ -34,6 +34,13 @@ try:
 except ImportError:
     import round_tracker
 
+# S4 R4: record 机制（M1 RecordStore / compose_record 确定性聚合）。同目录纯逻辑模块，
+# 无 astrbot 依赖；兼容包内 `from .` 与测试/直跑顶层 import。
+try:
+    from . import record
+except ImportError:
+    import record
+
 # ========================
 # Token 估算参数
 # ========================
@@ -683,6 +690,33 @@ def _is_round_boundary(messages: List[dict], idx: int) -> bool:
     return prev_rid != cur_rid
 
 
+def _max_grouped_round_end(round_groups: List[dict]) -> Optional[int]:
+    """S4 R4：从 round_groups 边界表取「已聚合到的最大 round 终点」（数值）。
+
+    供 compose_record_if_needed 两阶段提交里单调推进 last_compressed_round_id。
+    跳过 legacy 组的占位 [0,0]（end=0 仍计入但通常被真轮号覆盖）。无有效组返回 None。
+    """
+    mx: Optional[int] = None
+    for g in round_groups or []:
+        if not isinstance(g, dict):
+            continue
+        rr = g.get("round_range")
+        if not isinstance(rr, (list, tuple)) or len(rr) < 2:
+            continue
+        e = rr[1]
+        if isinstance(e, bool):
+            continue
+        if isinstance(e, str):
+            e = round_tracker.parse_round_id(e)
+            if e < 0:
+                continue
+        if not isinstance(e, int):
+            continue
+        if mx is None or e > mx:
+            mx = e
+    return mx
+
+
 def _align_compress_count_to_round_boundary(
     messages: List[dict], idx: int
 ) -> int:
@@ -802,6 +836,13 @@ class TFileManager:
         # 完全参照 self._recover_locks 模式（惰性建锁取锁）。同窗口压缩仍串行
         # （locked() 检测命中即跳过，保持旧「跳过不阻塞」语义），不同窗口各持各锁并行。
         self._compress_locks: Dict[str, asyncio.Lock] = {}
+        # S4 R4(D6): per-window「round_segmenting」锁——record 单一压缩执行器的写入权
+        # 边界。compose_record 的两阶段提交（temp 候选 → 进锁校验 generation → 原子写
+        # record_state/record.md/锚点）全程持此锁。与 _compress_locks 分离：旧 T1 覆盖式
+        # 压缩已退役，record 增量聚合是不同的写入器；S4 同步链路与 S5 BPC 后台压缩都只是
+        # 这把锁的调用者（D6 单一写入器），共用同一把锁保证「压最老组/推锚点/写 record.md」
+        # 这一底层动作的串行性，根治批3.5-A 号源/generation 回退坑。
+        self._round_segment_locks: Dict[str, asyncio.Lock] = {}
         # Per-window 内存消息缓冲区（减少高频 I/O）
         self._msg_buffer: Dict[str, List[dict]] = {}
         # S3 F1.4: per-window WAL 临时键序号（message_id 缺失时兜底去重用，单调递增）
@@ -965,6 +1006,15 @@ class TFileManager:
         if window_key not in self._compress_locks:
             self._compress_locks[window_key] = asyncio.Lock()
         return self._compress_locks[window_key]
+
+    def _get_round_segment_lock(self, window_key: str) -> asyncio.Lock:
+        """S4 R4(D6): 获取 per-window「round_segmenting」锁（惰性建锁，参照
+        _get_compress_lock 模式）。record 单一压缩执行器（compose_record 两阶段提交）
+        持此锁。不同窗口各持各锁并行；同窗口 record 写入串行（S4 同步 + S5 BPC 共用）。
+        """
+        if window_key not in self._round_segment_locks:
+            self._round_segment_locks[window_key] = asyncio.Lock()
+        return self._round_segment_locks[window_key]
 
     def _file_path(self, window_key: str) -> str:
         """计算 T 文件路径"""
@@ -1613,8 +1663,79 @@ class TFileManager:
         return f"{prefix}{sender}: {content}"
 
     # ========================
-    # 压缩核心逻辑
+    # 压缩核心逻辑（S4 R2 退役：旧 T1 覆盖式 blob 压缩已下线，转 record 增量聚合）
     # ========================
+
+    # --- S4 R2(D5): legacy T1 迁移（幂等纯函数） ---
+    @staticmethod
+    def _migrate_legacy_t1_to_record_group(t_file: dict) -> Tuple[bool, dict]:
+        """S4 R2(D5)：把现存旧 T1（compressed_summary 单 blob，覆盖式压缩产物）封档成
+        「第 0 号 legacy round-group」（rg000000，legacy_rg=True，sealed=True，不再压）。
+
+        旧覆盖式压缩与 record per-group 累加是两套不相容状态：同段历史会被压两次、
+        last_compressed_round_id 语义撞车。R2 上线把现存 T1 一次性封进
+        record_state.round_groups 当冷冻历史段，record 增量从其后真轮号开始累加。
+
+        **幂等**（最高危约束）：
+          - 已迁移（round_groups 里已存在 legacy_rg 组）→ 直接返回 (False, t_file)，
+            绝不重复迁移、绝不重压。
+          - T1 为空（无 compressed_summary）→ 无需迁移，返回 (False, t_file)。
+
+        **不丢不重压**：迁移只把 T1.compressed_summary 文本搬进 legacy 组的 summary_text/
+        full_text，**不动 T1 本体、不动 messages 原文数组**——build_llm_contexts 仍照旧从
+        T1 渲染注入（R3 批3 才改注入端），保证迁移不破坏现有上下文注入与压缩率。
+
+        legacy 组 round_range 推断（存量 T1 多无 round 覆盖信息）：
+          - 起点固定 0（历史冷冻段从最初算起）。
+          - 终点取 record_state.last_compressed_round_id 的数值（若有，S3 后压缩留下）；
+            否则取 0（纯 blob 无轮号覆盖信息，占位区间 [0,0]）。
+        legacy 组之后的真轮号（r1+）由 validate 规则 4「legacy 段后允许一次跳变」放行。
+
+        返回 (changed, t_file)：changed=True 表示本次产生迁移（调用方据此落盘）。
+        """
+        t1 = t_file.get("T1") or {}
+        summary = (t1.get("compressed_summary") or "").strip()
+        meta = t_file.setdefault("metadata", {})
+        rec_state = meta.setdefault("record_state", {})
+        rg_list = rec_state.get("round_groups")
+        if not isinstance(rg_list, list):
+            rg_list = []
+            rec_state["round_groups"] = rg_list
+
+        # 幂等：已有 legacy_rg 组 → 不重复迁移
+        for g in rg_list:
+            if isinstance(g, dict) and g.get("legacy_rg"):
+                return False, t_file
+
+        # 无旧 T1 摘要 → 无需迁移（首次 compose 直接从 r1 起）
+        if not summary:
+            return False, t_file
+
+        # 推断 legacy 区间终点
+        lcr = rec_state.get("last_compressed_round_id")
+        end_n = round_tracker.parse_round_id(lcr) if lcr else -1
+        if end_n < 0:
+            end_n = 0
+
+        legacy_group = {
+            "rg_id": record.format_rg_id(0),       # rg000000，legacy 专用号
+            "round_range": [0, end_n],
+            "tier": record.TIER_SUMMARY,           # 历史段以 summary 档存（已是压缩摘要）
+            "sealed": True,                        # 封档，不再压
+            "legacy_rg": True,                     # 历史冷冻标记
+            "full_text": summary,                  # 无更细 full，full 回退用摘要
+            "summary_text": summary,
+            "title": "历史对话摘要（迁移自旧 T1）",
+            "token_est": int(t1.get("token_count", 0) or 0),
+        }
+        # legacy 组放在 round_groups 最前（第 0 号）
+        rg_list.insert(0, legacy_group)
+        # 聚合锚指向 legacy 组（record 增量从其后开始）
+        rec_state["last_grouped_rg_id"] = legacy_group["rg_id"]
+        meta["record_legacy_migrated_at"] = datetime.now().strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+        return True, t_file
 
     async def compress_if_needed(
         self,
@@ -1627,365 +1748,280 @@ class TFileManager:
         cooldown_seconds: int = 300,
         target_min: float = 0.20,
         target_max: float = 0.40,
+        record_cfg: Optional[dict] = None,
     ) -> Tuple[dict, Optional[dict]]:
-        """检查并执行压缩
+        """S4 R2(D5)：旧 T1 覆盖式 blob 压缩【已退役】。
 
-        三重守卫：
-          ① total_tokens > token_limit
-          ② len(candidate) > keep_recent
-          ③ 距上次压缩 > cooldown_seconds
+        本入口保留以兼容 context_mixin Phase2 现有调用点（签名不变，只新增可选
+        record_cfg），但内部不再做覆盖式前段 70% 压缩。改为：① 幂等迁移现存 T1 →
+        legacy round-group；② 转调 record 单一压缩执行器 compose_record_if_needed
+        （D6 两阶段提交）。
 
-        Returns:
-            (更新后的 t_file, 压缩结果 dict 或 None)
+        旧参数 keep_recent / compress_front_ratio / target_min/max 在 record 路径下不再
+        生效（record 用 rg_target_rounds / force_seal 阈值），保留仅为签名兼容。
+        token_limit 作为 record 触发阈值的兜底默认（record_cfg.record_compose_token_limit 优先）。
+        record_cfg：面板组装的 record 配置 dict（rg_*/compress_delta_floor 等）；None 时
+        record 全走 DEFAULT 兜底（仍可跑，只是面板调参不生效）。
+
+        返回 (t_file, result)：result 为本次 record 聚合摘要（dict）或 None（未触发/无产出）。
         """
-        # 构建候选上下文
-        candidate = self.build_llm_contexts(t_file)
-
-        if not candidate:
-            return t_file, None
-
-        # ① 估算总 token
-        total_tokens = sum(estimate_context_msg_tokens(m) for m in candidate)
-
-        if total_tokens <= token_limit:
-            return t_file, None
-
-        # ② 消息数量检查（基于 T 文件原始消息数，而非含 T1 的 candidate 数）
-        raw_msg_count = len(t_file.get("messages", []))
-        if raw_msg_count <= keep_recent:
-            logger.debug(
-                f"[CHECKPOINT] {window_key}: token {total_tokens} > {token_limit} "
-                f"但原始消息数 {raw_msg_count} ≤ keep_recent {keep_recent}，跳过"
-            )
-            return t_file, None
-
-        # ③ 冷却期
-        last_time_str = t_file.get("T1", {}).get("last_compress_time", "")
-        if last_time_str:
-            try:
-                last_time = datetime.fromisoformat(last_time_str).timestamp()
-                if (time.time() - last_time) < cooldown_seconds:
-                    logger.debug(
-                        f"[CHECKPOINT] {window_key}: 冷却期内 "
-                        f"(上次 {last_time_str})，跳过"
-                    )
-                    return t_file, None
-            except ValueError:
-                pass  # 时间解析失败，忽略冷却期
-
-        # ④ 压缩互斥检查：同一窗口不允许并发压缩（S3 F1.8：per-window 锁取代全局 set）
-        compress_lock = self._get_compress_lock(window_key)
-        if compress_lock.locked():
-            logger.info(
-                f"[CHECKPOINT] {window_key}: 另一个压缩正在进行中，跳过"
-            )
-            return t_file, None
-
-        # 三重守卫 + 互斥检查全部通过，取锁并执行压缩。
-        # 用非阻塞 acquire 风格：locked() 已判过，此处必然立即获得（同窗口压缩串行；
-        # 极端并发下若被抢先取走，acquire 会等待——但 locked() 检测已大幅收窄该窗口）。
-        await compress_lock.acquire()
-        try:  # M-1: finally 保证释放压缩锁
-            logger.info(
-                f"[CHECKPOINT] 触发压缩: {window_key}, "
-                f"总 token {total_tokens} > {token_limit}, "
-                f"消息 {len(candidate)} 条（原始 {raw_msg_count} 条）"
-            )
-
-            # 检测是否存在旧 T1 摘要（占 candidate 前 2 条）
-            has_previous_summary = (
-                len(candidate) > 0
-                and candidate[0].get("role") == "user"
-                and T1_SUMMARY_PREFIX in (candidate[0].get("content") or "")
-            )
-            t1_count_in_candidate = 2 if has_previous_summary else 0
-
-            # 计算压缩范围（排除 T1 消息对后，对原始消息按比例压缩）
-            available_for_compress = raw_msg_count - keep_recent
-            if available_for_compress <= 0:
-                logger.debug(
-                    f"[CHECKPOINT] {window_key}: 排除保留后无可压缩消息，跳过"
-                )
-                return t_file, None
-
-            original_compress_count = max(1, int(available_for_compress * compress_front_ratio))
-            raw_messages = t_file.get("messages", [])
-
-            # 语义完整性（legacy 兜底）：确保不切开 user-assistant 对话对。
-            # round_id=None 的旧迁移消息无 round 信息，靠这条原 user/assistant 补丁防切。
-            # 如果分割点正好在 user 消息后（下一条是 assistant 回复），多包含 1 条。
-            # S3 批3.5-C2(C-3 candidate-raw 残留): 判定改用 raw_messages 下标，与最终切片
-            # (to_compress/remaining 均 raw 系)一致——candidate 因 _repair 插占位/删 orphan
-            # 长度漂移，用 candidate[_split_idx] 会读到错位消息致 ±1 误判。
-            if original_compress_count < len(raw_messages):
-                next_msg = raw_messages[original_compress_count]
-                if next_msg.get("role") == "assistant" and original_compress_count < available_for_compress:
-                    prev_msg = raw_messages[original_compress_count - 1] if original_compress_count > 0 else None
-                    if prev_msg and prev_msg.get("role") == "user":
-                        original_compress_count += 1
-
-            # S3 F1.6：在 user-assistant 防切（legacy 兜底）之上叠加 round 边界对齐。
-            # original_compress_count 是对 t_file["messages"] 的切分下标（见下方
-            # remaining_messages = messages[original_compress_count:]）。对齐后切分点
-            # 落在完整 round 边界——绝不把某轮 first_reply 切到该轮中间。
-            # 同轮的 user+assistant+tool 共享 round_id，对齐天然也保证 tool 对完整。
-            aligned_count = _align_compress_count_to_round_boundary(
-                raw_messages, original_compress_count
-            )
-            # S3 批3.5-C(forward-align-overshoots-keep-recent): align 向后挪(退到 0 时)
-            # 在「单个大 partial 轮覆盖到列表末尾」场景会返回 n(连续 user 刷屏 / 限流
-            # 不回复时 round_tracker 把所有消息归同一 partial 轮)，越过
-            # available_for_compress → remaining=[] → keep_recent 最近上下文被压光。
-            # 夹回上限保住最近 keep_recent 条(此场景宁可切分点不在 round 边界)。
-            _clamped = min(aligned_count, available_for_compress)
-            clamp_hit = _clamped != aligned_count  # 是否真发生 overshoot 夹回
-            aligned_count = _clamped
-            # S3 批3.5-C2(C-2 orphan tool): clamp 夹回的切分点可能落在 step 中间——若
-            # remaining[0] 是 tool 结果(其配对 assistant 已被压走)，读侧
-            # _repair_tool_call_pairs 会把它当 orphan 静默删除致 tool 结果丢失。向前回退
-            # 切分点到 step 边界(remaining[0] 非 tool 且其前一条非 assistant.tool_calls)；
-            # 仅当找到有效边界(>0)才采用，否则保 clamp 值靠读侧 _repair 兜底。
-            if clamp_hit:
-                _safe = aligned_count
-                while _safe > 0:
-                    _rem0 = raw_messages[_safe] if _safe < len(raw_messages) else None
-                    _prev = raw_messages[_safe - 1]
-                    _rem0_tool = bool(_rem0) and _rem0.get("role") == "tool"
-                    _prev_tc = _prev.get("role") == "assistant" and _prev.get("tool_calls")
-                    if _rem0_tool or _prev_tc:
-                        _safe -= 1
-                    else:
-                        break
-                if _safe > 0:
-                    aligned_count = _safe
-            if aligned_count != original_compress_count:
-                logger.info(
-                    f"[CHECKPOINT] {window_key}: 压缩切分点调整 "
-                    f"{original_compress_count} → {aligned_count} "
-                    f"({'overshoot夹回+step对齐' if clamp_hit else 'F1.6 round边界对齐'})"
-                )
-                original_compress_count = aligned_count
-
-            # S3 批3.5-C(candidate-raw-index-desync): to_compress 的原始消息部分从
-            # raw(t_file messages)切，与 remaining_messages(下方 raw 系)同下标系。
-            # candidate=build_llm_contexts 内 _repair_tool_call_pairs 插占位/删 orphan
-            # 会改变长度，若用 candidate[compress_count] 切则与 raw 系错位 → 被压缩段与
-            # 保留段错配 → 静默丢/重一条消息。旧 T1 摘要仍取 candidate 前缀(滚动压缩)。
-            t1_prefix = candidate[:t1_count_in_candidate]
-            to_compress = t1_prefix + raw_messages[:original_compress_count]
-
-            # 序列化待压缩内容
-            messages_text = serialize_messages_for_compress(to_compress)
-            compress_tokens = estimate_tokens(messages_text)
-
-            # 构建压缩 prompt
-            prompt = build_compress_prompt(
-                messages_text=messages_text,
-                original_tokens=compress_tokens,
-                target_min_ratio=target_min,
-                target_max_ratio=target_max,
-                has_previous_summary=has_previous_summary,
-            )
-
-            # 调用 Flash Lite（动态 max_output_tokens 硬保证压缩率上限）
-            raw_max = max(100, int(compress_tokens * target_max))
-            delta = max(50, int(raw_max * 0.15))  # 15% 余量，模型通常不会写满上限
-            dynamic_max_tokens = raw_max + delta
-            logger.info(
-                f"[CHECKPOINT] 压缩 max_tokens: {dynamic_max_tokens} "
-                f"(原文 {compress_tokens} × {target_max} + Δ{delta})"
-            )
-
-            t0 = time.monotonic()
-            try:
-                compressed_text = await flash_lite_caller(prompt, max_output_tokens=dynamic_max_tokens, window_key=window_key)
-                latency = (time.monotonic() - t0) * 1000
-            except Exception as e:
-                logger.error(f"[CHECKPOINT] 压缩调用失败: {e}")
-                return t_file, None
-
-            if not compressed_text or not compressed_text.strip():
-                logger.warning("[CHECKPOINT] Flash Lite 返回空结果，跳过")
-                return t_file, None
-
-            # 压缩率验证
-            compressed_tokens = estimate_tokens(compressed_text)
-            actual_ratio = compressed_tokens / max(compress_tokens, 1)
-
-            if actual_ratio < target_min:
-                logger.warning(
-                    f"[CHECKPOINT] 压缩率 {actual_ratio:.1%} 低于目标 "
-                    f"{target_min:.0%}，摘要可能过于简略 "
-                    f"(原文 {compress_tokens} → {compressed_tokens} tokens)"
-                )
-            elif actual_ratio > target_max:
-                logger.warning(
-                    f"[CHECKPOINT] 压缩率 {actual_ratio:.1%} 高于目标 "
-                    f"{target_max:.0%}，摘要可能保留过多细节"
-                )
-            else:
-                logger.info(
-                    f"[CHECKPOINT] 压缩率 {actual_ratio:.1%} ✓ "
-                    f"(目标 {target_min:.0%}~{target_max:.0%})"
-                )
-
-            # 计算实际被压缩的原始消息数（不含 T1 消息对）
-            original_msgs_compressed_count = original_compress_count
-            # 加上之前已经压缩的
-            total_original_compressed = (
-                t_file["T1"].get("original_msg_count", 0)
-                + original_msgs_compressed_count
-            )
-
-            # 计算剩余的 messages（从原始消息数组中跳过被压缩的部分）
-            remaining_messages = t_file["messages"][original_compress_count:]
-            # 记录压缩前快照的消息总数（用于 Save 时合并中间到达的消息）
-            pre_compress_msg_count = len(t_file["messages"])
-
-            # S3 F1.6：算被压缩段最后一轮 round_id（用于更新 record_state）。
-            # 倒扫被压缩段找最后一条非 None round_id（legacy 消息 round_id=None 跳过）。
-            # S3 批3.5-C2(C-1): 若 clamp overshoot 把某轮 rN 切成两半(尾部留在
-            # remaining)，不能把 rN 标为「已完整压缩」——否则 F2.x record 增量按
-            # last_compressed_round_id 切片会漏写 rN 残留。跳过「尾部仍在 remaining」的
-            # 被切轮，取被压缩段里最后一个【完整】压缩的轮。
-            _remaining_first_rid = (
-                remaining_messages[0].get("round_id") if remaining_messages else None
-            )
-            compressed_last_round_id = None
-            for _m in reversed(t_file["messages"][:original_compress_count]):
-                _rid = _m.get("round_id")
-                if _rid is not None:
-                    if _rid == _remaining_first_rid:
-                        continue  # 该轮被切，尾部在 remaining，不算完整压缩
-                    compressed_last_round_id = _rid
-                    break
-
-            now_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-
-            # 更新 T 文件
-            old_history = t_file["T1"].get("compress_history", [])
-            new_history_entry = {
-                "time": now_iso,
-                "before_tokens": compress_tokens,
-                "after_tokens": compressed_tokens,
-                "ratio": round(actual_ratio, 4),
-                "msgs_compressed": original_msgs_compressed_count,
-            }
-
-            # 限制 compress_history 最多保留最近 20 条
-            compress_history = (old_history + [new_history_entry])[-20:]
-
-            t_file["T1"] = {
-                "compressed_summary": compressed_text,
-                "token_count": compressed_tokens,
-                "compression_ratio": round(actual_ratio, 4),
-                "original_msg_count": total_original_compressed,
-                "compression_count": t_file["T1"].get("compression_count", 0) + 1,
-                "last_compress_time": now_iso,
-                "compress_history": compress_history,
-            }
-            t_file["metadata"]["total_compressions"] = (
-                t_file["metadata"].get("total_compressions", 0) + 1
-            )
-
-            # S3 F1.6：更新 record_state.last_compressed_round_id = 已压缩的最后一轮。
-            # 一致性合约（设计 §F2.1）：单调不减，绝不回退（崩溃恢复时 record 进度可信）。
-            # round_id 形如 r000123，零填充字典序==数值序，可安全字符串比较取 max。
-            if compressed_last_round_id is not None:
-                rec_state = t_file["metadata"].setdefault("record_state", {})
-                prev_lcr = rec_state.get("last_compressed_round_id")
-                # S3 批3.5-D(lcr-string-compare): 数值比较而非字符串字典序，防号位超
-                # 6 位(单窗口百万轮)后 'r1000000' < 'r999999' 致单调 max 永久冻结。
-                if prev_lcr is None or round_tracker.parse_round_id(
-                    compressed_last_round_id
-                ) > round_tracker.parse_round_id(prev_lcr):
-                    rec_state["last_compressed_round_id"] = compressed_last_round_id
-
-            # 更新平均压缩率
-            all_ratios = [h["ratio"] for h in compress_history if "ratio" in h]
-            if all_ratios:
-                t_file["metadata"]["avg_compression_ratio"] = round(
-                    sum(all_ratios) / len(all_ratios), 4
-                )
-
-            # 保存 T 文件（合并式 Save：锁内 load-merge-save）
-            # 压缩期间可能有新消息通过 append_messages 写入磁盘，
-            # 需要重新 load 最新状态，提取中间到达的消息，追加到保留部分
-            async with self._get_lock(window_key):
-                current_t_file = await self.load(window_key)
-                current_msgs = current_t_file.get("messages", [])
-
-                # 冲突检测：如果磁盘消息数 < 压缩前快照消息数，
-                # 说明另一个并发压缩已先保存（消息被裁剪），放弃本次保存
-                if len(current_msgs) < pre_compress_msg_count:
-                    logger.warning(
-                        f"[CHECKPOINT] {window_key}: 检测到并发压缩冲突 "
-                        f"(磁盘 {len(current_msgs)} < 快照 {pre_compress_msg_count})，"
-                        f"放弃本次保存，使用磁盘最新状态"
-                    )
-                    return current_t_file, None
-
-                # 提取压缩期间中间到达的消息
-                mid_arrival_msgs = current_msgs[pre_compress_msg_count:]
-
-                # 合并：压缩后保留部分 + 中间到达的消息
-                t_file["messages"] = remaining_messages + mid_arrival_msgs
-
-                # 同步 metadata：取 max 防止统计/号源回退
-                cur_meta = current_t_file.get("metadata", {})
-                t_file["metadata"]["total_messages_ever"] = max(
-                    t_file["metadata"].get("total_messages_ever", 0),
-                    cur_meta.get("total_messages_ever", 0),
-                )
-                # S3 批3.5-A(critical, compress-clobbers-numbersource): 号源/世代「只进不退」。
-                # 压缩期间并发 append 经唯一取号入口推进了【磁盘】metadata 的
-                # next_round_id/next_step_id/generation（mid_arrival 消息已带这些新号），
-                # 但本次 save 的 t_file 是压缩前【快照】(旧号源)。若用快照整份覆盖磁盘 →
-                # 号源回退 → 下次 append 重发已用过的 round_id/step_id（违反全局单调铁律，
-                # 且号源只存 T 文件 metadata、无 state 备份、_do_recover 不校验，不可自愈）。
-                # 故这三者与 total_messages_ever 一样从 cur_meta(磁盘最新)取 max。
-                for _ns_key in ("next_round_id", "next_step_id", "generation"):
-                    t_file["metadata"][_ns_key] = max(
-                        int(t_file["metadata"].get(_ns_key, 0) or 0),
-                        int(cur_meta.get(_ns_key, 0) or 0),
-                    )
-
-                if mid_arrival_msgs:
-                    logger.info(
-                        f"[CHECKPOINT] {window_key}: 压缩期间有 "
-                        f"{len(mid_arrival_msgs)} 条新消息到达，已合并保留"
-                    )
-
-                await self.save(window_key, t_file)
-
-        finally:
-            # M-1: 无论成功/失败/异常，始终释放压缩锁（S3 F1.8）
-            compress_lock.release()
-
-        # 保存到 checkpoint_history 表（供面板统计）
-        await self._save_to_db(
+        return await self.compose_record_if_needed(
             window_key=window_key,
-            compressed_content=compressed_text,
-            original_count=original_msgs_compressed_count,
-            compression_ratio=actual_ratio,
-            token_estimate=compressed_tokens,
+            t_file=t_file,
+            flash_lite_caller=flash_lite_caller,
+            cfg=record_cfg,
+            token_limit=token_limit,
         )
+
+    # --- S4 R4(D6): record 单一压缩执行器 + round_segmenting 锁两阶段提交 ---
+    def _make_segment_llm_caller(
+        self, flash_lite_caller: Callable, window_key: str, main_loop
+    ):
+        """把 _call_flash_lite（async，返回纯文本）包成 compose_record 要的同步契约
+        llm_caller(batch_rounds, cfg) -> List[GroupSpec]。
+
+        关键（跨 loop 安全）：record.compose_record 是纯同步逻辑，会被 run_in_executor
+        丢到【worker 线程】跑。但 _call_flash_lite 内部用 self._session（aiohttp
+        ClientSession，绑定**主 loop**），在 worker 线程新建 loop 跑会因 session 跨 loop
+        报错。故这里用 asyncio.run_coroutine_threadsafe 把 flash_lite 协程**提交回主
+        loop** 执行，worker 线程阻塞 .result() 等结果——aiohttp 始终在主 loop，安全。
+
+        prompt 构造 / JSON 解析全走 record 纯逻辑（build_segment_prompt /
+        parse_group_specs），跨 provider 健壮容错。caller 抛异常 / 返回空 → compose 兜底。
+        """
+        import concurrent.futures as _cf
+
+        def caller(batch_rounds, cfg):
+            prompt = record.build_segment_prompt(batch_rounds, cfg)
+            # 动态 max_output_tokens：按本批字符量给足分段输出空间（约 1/2 原文）。
+            total_chars = sum(int(r.get("char_len", 0) or 0) for r in batch_rounds)
+            max_out = max(1024, min(8192, total_chars // 3 + 512))
+            coro = flash_lite_caller(
+                prompt, max_output_tokens=max_out, window_key=window_key
+            )
+            # 提交回主 loop 执行（aiohttp session 在主 loop）；worker 线程阻塞等结果。
+            fut = asyncio.run_coroutine_threadsafe(coro, main_loop)
+            try:
+                raw = fut.result(timeout=120)
+            except _cf.TimeoutError:
+                fut.cancel()
+                raise RuntimeError("flash_lite 分段调用超时(120s)")
+            specs = record.parse_group_specs(raw, batch_rounds, logger=logger)
+            return specs
+        return caller
+
+    async def compose_record_if_needed(
+        self,
+        window_key: str,
+        t_file: dict,
+        flash_lite_caller: Callable,
+        cfg: Optional[dict] = None,
+        token_limit: int = 50000,
+    ) -> Tuple[dict, Optional[dict]]:
+        """S4 R4(D6)：record 增量聚合的单一压缩执行器，持 round_segmenting 锁两阶段提交。
+
+        触发策略（本批最简，BPC 后台留 S5）：请求体 token 超阈值（cfg.record_compose_token_limit
+        或 token_limit）→ 同步进入接力聚合。
+
+        接力链（D6）：连续多次 compose 直到任一中止判据命中：
+          (a) compose 无新增产出（wrote=False）；
+          (b) 连续 compose 后请求体 token 降量 < compress_delta_floor（默认 200，防巨图死循环）——
+              **判据是『降量不足』而非『仍超阈值』**；
+          (c) 接力次数达 record_max_relay_rounds（默认 3，次数兜底）。
+
+        两阶段提交（防批3.5-A 号源/generation 回退）：
+          1. 锁外算候选：record.compose_record 产出新 round_groups + 已写 record.md.tmp→正式
+             （候选隔离，validate 门禁不过绝不覆盖）。
+          2. 进 round_segmenting 锁 → 重新 load 磁盘最新 t_file → 取 max(候选 generation,
+             磁盘 generation) 校验：候选若基于陈旧 generation 仍可提交，但只把 record_state
+             的边界表/锚点【单调】合并进磁盘最新 t_file（last_grouped/last_compressed 取数值大者），
+             绝不用陈旧快照整份覆盖磁盘 metadata 号源。
+          3. 锁内 save（原子 mkstemp→fsync→replace）落盘。
+        区分可逆 / 不可逆回滚边界：record.md 已被 compose 原子写（不可逆侧，但派生物可重渲）；
+        record_state 锚点更新在锁内事务（可逆：失败则磁盘维持原状）。
+
+        compose 失败（LLM down / 门禁拒收）→ 维持现状不破坏（批2a 兜底已保证不写盘）。
+        """
+        cfg = cfg if isinstance(cfg, dict) else {}
+        # 1) 触发判定：请求体 token 是否超阈值
+        candidate_ctx = self.build_llm_contexts(t_file)
+        if not candidate_ctx:
+            return t_file, None
+        trig_limit = int(
+            cfg.get("record_compose_token_limit", token_limit) or token_limit
+        )
+        cur_tokens = sum(estimate_context_msg_tokens(m) for m in candidate_ctx)
+        if cur_tokens <= trig_limit:
+            return t_file, None
+
+        # 2) 互斥：同窗口 record 写入串行（locked 即跳过，保持「不阻塞」语义）
+        seg_lock = self._get_round_segment_lock(window_key)
+        if seg_lock.locked():
+            logger.info(f"[RECORD] {window_key}: 另一 record 聚合进行中，跳过")
+            return t_file, None
+
+        # 2.5) S4 R2(D5): 首次触发先幂等迁移现存旧 T1 → legacy round-group。
+        # 在 round_segment 锁 + 业务锁内做，保证迁移落盘与后续 compose 不被并发撕裂。
+        # 幂等：已有 legacy_rg 组 / 无旧 T1 → 不产生变更、不重复迁移、不重压。
+        async with seg_lock:
+            async with self._get_lock(window_key):
+                disk_t = await self.load(window_key)
+                migrated, disk_t = self._migrate_legacy_t1_to_record_group(disk_t)
+                if migrated:
+                    await self.save(window_key, disk_t)
+                    legacy_end = (
+                        (disk_t.get("metadata", {}) or {})
+                        .get("record_state", {})
+                        .get("round_groups", [{}])[0]
+                        .get("round_range", [0, 0])[1]
+                    )
+                    logger.warning(
+                        f"[RECORD] {window_key}: 旧 T1 已迁移为 legacy round-group "
+                        f"(rg000000, round_range=[0,{legacy_end}], sealed)"
+                    )
+                t_file = disk_t  # 接力基于迁移后磁盘最新
+
+        delta_floor = int(cfg.get("compress_delta_floor", 200) or 200)
+        max_relay = int(cfg.get("record_max_relay_rounds", 3) or 3)
+
+        relay = 0
+        last_tokens = cur_tokens
+        total_groups_added = 0
+        any_wrote = False
+
+        while relay < max_relay:
+            relay += 1
+            # ---- 阶段一（锁外）：算候选 + 候选隔离写 record.md ----
+            prev_state = (t_file.get("metadata", {}) or {}).get("record_state", {})
+            messages = t_file.get("messages", [])
+            loop = asyncio.get_running_loop()
+            caller = self._make_segment_llm_caller(
+                flash_lite_caller, window_key, loop
+            )
+            try:
+                compose_res = await loop.run_in_executor(
+                    None,
+                    lambda: record.compose_record(
+                        CHECKPOINTS_DIR, window_key, messages, prev_state,
+                        caller, cfg,
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"[RECORD] {window_key}: compose 执行异常 {e}")
+                break
+
+            if not compose_res.wrote:
+                # 无产出（无新增 / LLM 失败 / 门禁拒收）→ 接力中止 (a)
+                if compose_res.errors:
+                    logger.info(
+                        f"[RECORD] {window_key}: compose 未写盘 "
+                        f"(fallback={compose_res.fallback}) {compose_res.errors}"
+                    )
+                break
+
+            # ---- 阶段二（进锁）：两阶段提交 generation 校验 + 锚点单调合并 ----
+            committed = False
+            async with seg_lock:
+                async with self._get_lock(window_key):
+                    disk_t = await self.load(window_key)
+                    disk_meta = disk_t.setdefault("metadata", {})
+                    disk_rec = disk_meta.setdefault("record_state", {})
+
+                    # generation 取 max 单调回写：append 路径取号会推进磁盘 generation；
+                    # compose 不取号、不应让 metadata.generation 回退（批3.5-A 铁律：号源
+                    # 只进不退）。save() 不改 generation，故这里显式取 max 守住。
+                    cand_gen = int(
+                        (t_file.get("metadata", {}) or {}).get("generation", 0) or 0
+                    )
+                    disk_gen = int(disk_meta.get("generation", 0) or 0)
+                    disk_meta["generation"] = max(cand_gen, disk_gen)
+
+                    # ★A① 单调守卫（防 round_groups 整份替换吞并发结果）：候选是基于阶段一
+                    # 快照算的「全量 round_groups」。若进锁后磁盘的已聚合最大轮终点已 >
+                    # 候选的（说明并发 compose / 迁移在阶段一期间推进了磁盘边界表），整份替换
+                    # 会回退/吞掉磁盘更新的组 → 作废本候选（可逆回滚：不写边界表，本次接力跳过，
+                    # 下一轮接力基于磁盘最新重算）。绝不让陈旧候选覆盖更超前的磁盘边界表。
+                    cand_end = _max_grouped_round_end(compose_res.round_groups)
+                    disk_end = _max_grouped_round_end(disk_rec.get("round_groups") or [])
+                    if (disk_end is not None and cand_end is not None
+                            and disk_end > cand_end):
+                        logger.warning(
+                            f"[RECORD] {window_key}: 阶段二检测磁盘边界表更超前 "
+                            f"(disk_end={disk_end} > cand_end={cand_end})，作废本候选不覆盖"
+                        )
+                        disk_meta["record_state"] = disk_rec
+                        await self.save(window_key, disk_t)  # 仅落 generation 的 max
+                        t_file = disk_t
+                        # 不计入 any_wrote；中止接力（磁盘已被并发推进，让其接管）
+                        break
+
+                    # 锚点单调合并：last_grouped_rg_id（数值大者）
+                    new_grouped = compose_res.last_grouped_rg_id
+                    if new_grouped is not None:
+                        old_grouped = disk_rec.get("last_grouped_rg_id")
+                        if (old_grouped is None
+                                or record.parse_rg_id(new_grouped)
+                                > record.parse_rg_id(old_grouped)):
+                            disk_rec["last_grouped_rg_id"] = new_grouped
+
+                    # 边界表替换：候选是「全量新 round_groups」（kept + 新组，已含 legacy +
+                    # sealed 前缀）。上方单调守卫已确认磁盘未更超前，此替换不丢并发结果。
+                    disk_rec["round_groups"] = compose_res.round_groups
+
+                    # last_compressed_round_id 单调推进 = 已聚合到的最大 round 终点。
+                    if cand_end is not None:
+                        new_lcr = round_tracker.format_round_id(cand_end)
+                        old_lcr = disk_rec.get("last_compressed_round_id")
+                        if (old_lcr is None
+                                or cand_end
+                                > round_tracker.parse_round_id(old_lcr)):
+                            disk_rec["last_compressed_round_id"] = new_lcr
+
+                    disk_meta["record_state"] = disk_rec
+                    await self.save(window_key, disk_t)
+                    t_file = disk_t  # 后续接力基于磁盘最新
+                    committed = True
+
+            if not committed:
+                break
+
+            any_wrote = True
+            total_groups_added += 1
+
+            # ---- 接力中止判据 ----
+            new_ctx = self.build_llm_contexts(t_file)
+            new_tokens = sum(estimate_context_msg_tokens(m) for m in new_ctx)
+            delta = last_tokens - new_tokens
+            logger.info(
+                f"[RECORD] {window_key}: 接力#{relay} token {last_tokens}→{new_tokens} "
+                f"(Δ={delta})"
+            )
+            # (b) 降量不足（防巨图死循环）——非「仍超阈值」
+            if delta < delta_floor:
+                logger.info(
+                    f"[RECORD] {window_key}: 接力中止 token 降量 {delta} "
+                    f"< floor {delta_floor}"
+                )
+                break
+            last_tokens = new_tokens
+            # 仍超阈值才继续接力；已降到阈值下则自然停
+            if new_tokens <= trig_limit:
+                break
+
+        if not any_wrote:
+            return t_file, None
 
         result = {
-            "original_messages": original_msgs_compressed_count,
-            "original_tokens": compress_tokens,
-            "compressed_tokens": compressed_tokens,
-            "compression_ratio": round(actual_ratio, 4),
-            "kept_messages": len(remaining_messages),
-            "latency_ms": round(latency),
+            "mode": "record_compose",
+            "relay_rounds": relay,
+            "groups_committed": total_groups_added,
+            "token_before": cur_tokens,
+            "token_after": last_tokens,
         }
-
         logger.info(
-            f"[CHECKPOINT] 完成: {window_key}, "
-            f"{original_msgs_compressed_count} 条 → {actual_ratio:.1%}, "
-            f"耗时 {latency:.0f}ms, 保留 {len(remaining_messages)} 条原文"
+            f"[RECORD] {window_key}: record 聚合完成 relay={relay} "
+            f"committed={total_groups_added} token {cur_tokens}→{last_tokens}"
         )
-
         return t_file, result
 
     # ========================

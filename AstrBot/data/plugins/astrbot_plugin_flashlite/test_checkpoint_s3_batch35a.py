@@ -42,6 +42,21 @@ import pytest  # noqa: E402
 import checkpoint  # noqa: E402
 from checkpoint import TFileManager  # noqa: E402
 
+# ⚠️ S4 批2b R2(D5) 退役声明：本文件测的是【旧 T1 覆盖式 blob 压缩】特有行为
+# （fake_caller 返回摘要字符串、断言 T1.compressed_summary 非空 / messages 被裁短）。
+# S4 批2b 已退役旧覆盖式压缩路径——compress_if_needed 转调 record 增量聚合
+# （compose_record_if_needed），caller 契约变为「返回 JSON 分段」、且 record 路径
+# 【绝不裁 messages 原文】（D1 铁律：批3 R3 分级读取上线前裁原文=丢轮）。故旧 caller
+# 返回的纯摘要文本被 record JSON 解析判为无产出 → compose 兜底 → result=None，这两个
+# 旧断言必然不成立。
+# 这两条测试守护的真·通用不变量「压缩 merge-save 号源 next_round_id/next_step_id/
+# generation 只进不退」已由 record 两阶段提交（compose_record_if_needed 阶段二
+# generation 取 max）接管，并在 test_record_s4_batch2b.py::两阶段提交 generation 校验
+# 重新覆盖。本文件作为旧实现的回归保护归档保留（skip），不删除。
+pytestmark = pytest.mark.skip(
+    reason="S4批2b R2 退役旧T1覆盖式压缩；号源不回退不变量由 batch2b 两阶段提交测试接管"
+)
+
 
 @pytest.fixture()
 def tmp_ckpt(monkeypatch):
