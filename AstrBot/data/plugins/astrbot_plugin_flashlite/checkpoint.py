@@ -61,6 +61,22 @@ CHECKPOINTS_DIR = os.path.join(DB_DIR, "checkpoints")
 T1_SUMMARY_PREFIX = "[对话历史压缩摘要]"
 T1_ACK_CONTENT = "好的，我已了解之前的对话历史。"
 
+# record 概要块召回指针（D7 降档摘要不自知缺口修复）：
+# 真机实测——D7 降档把老话题压成 summary/brief 注入后，主模型不知道这是压缩摘要、
+# 误以为是完整逐字记忆，被要求逐字复述时凭摘要 + 固定人设幻觉编造冒充原文。
+# 在 record 概要块开头统一加一句总说明，告知主模型：
+#   ① 概要块各档（full 是 record 聚合记录、summary/brief 是进一步压缩摘要）均非
+#      messages 逐字原文；② 需要某轮逐字原文/精确措辞/完整细节时调 QQ_data_original
+#      召回真实消息；③ 严禁凭摘要自行编造。措辞精准区分「record 聚合/摘要 ↔ messages
+#   逐字原文」。该串静态恒定，拼在 T1_SUMMARY_PREFIX 之后、各分级 block 之前，
+#   不破坏 KVCache 前缀稳定性（每次注入完全一致）。
+T1_RECORD_RECALL_HINT = (
+    "（说明：以下为历史对话的分级记录。full 档为 record 聚合记录、summary/brief 档为"
+    "进一步压缩的摘要，均非逐字原文。若需要某轮的逐字原文、精确措辞或完整细节，"
+    "请调用 QQ_data_original 按消息序号/关键词召回真实消息原文后再回答，"
+    "严禁凭本记录摘要自行编造或冒充原文。）"
+)
+
 
 # ========================
 # Token 估算工具（保留自 v1）
@@ -1722,15 +1738,21 @@ class TFileManager:
             rr = g.get("round_range") or [None, None]
             title = g.get("title") or ""
             head = f"[{g.get('rg_id', '?')} 轮次{rr[0]}-{rr[1]} {tier}]"
+            # 降档组（summary/brief）逐组标「(摘要)」：配合块首召回指针，让主模型逐组
+            # 识别哪些是压缩档、避免把摘要当逐字原文复述（D7 不自知缺口修复）。
+            if tier != record.TIER_FULL:
+                head += "（摘要）"
             if title:
                 head += f" {title}"
             block_parts.append(f"{head}\n{body}")
 
         if block_parts:
             record_text = "\n\n".join(block_parts)
+            # 概要块开头统一加召回指针（T1_RECORD_RECALL_HINT）：告知主模型这是分级记录、
+            # 非逐字原文，逐字原文须调 QQ_data_original 召回，严禁凭摘要编造（D7 缺口修复）。
             contexts.append({
                 "role": "user",
-                "content": f"{T1_SUMMARY_PREFIX}\n{record_text}",
+                "content": f"{T1_SUMMARY_PREFIX}\n{T1_RECORD_RECALL_HINT}\n\n{record_text}",
             })
             contexts.append({
                 "role": "assistant",
